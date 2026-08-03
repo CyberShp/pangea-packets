@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import json
+import posixpath
+import shlex
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import paramiko
+
+from .models import RemoteHost
+
+
+@dataclass
+class RemoteResult:
+    exitCode: int
+    stdout: str
+    stderr: str
+
+
+class SSHClient:
+    def __init__(self, host: RemoteHost) -> None:
+        self.host = host
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    def connect(self) -> None:
+        password = self.host.auth.password
+        if not password:
+            raise RuntimeError("未配置 SSH 密码")
+        self.client.connect(
+            hostname=self.host.address,
+            port=self.host.sshPort,
+            username=self.host.auth.username,
+            password=password,
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=15,
+            auth_timeout=15,
+            banner_timeout=15,
+        )
+
+    def close(self) -> None:
+        self.client.close()
+
+    def run(self, command: str, timeout: int = 60) -> RemoteResult:
+        stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        return RemoteResult(exit_code, stdout.read().decode(), stderr.read().decode())
+
+    def run_as_root(self, command: str, timeout: int = 60) -> RemoteResult:
+        root_password = self.host.privilege.rootPassword
+        if not root_password:
+            raise RuntimeError("未配置 su root 密码")
+        wrapped = f"su -c {shlex.quote(command)}"
+        stdin, stdout, stderr = self.client.exec_command(wrapped, timeout=timeout, get_pty=True)
+        stdin.write(root_password + "\n")
+        stdin.flush()
+        exit_code = stdout.channel.recv_exit_status()
+        return RemoteResult(exit_code, stdout.read().decode(), stderr.read().decode())
+
+    def upload(self, local_path: Path, remote_path: str) -> None:
+        sftp = self.client.open_sftp()
+        try:
+            parent = posixpath.dirname(remote_path)
+            self.run(f"mkdir -p {shlex.quote(parent)}")
+            sftp.put(str(local_path), remote_path)
+        finally:
+            sftp.close()
+
+
+def inspect_host(host: RemoteHost) -> dict[str, Any]:
+    client = SSHClient(host)
+    try:
+        client.connect()
+        basic = client.run("uname -s; uname -m; command -v python3 || true; python3 --version 2>&1 || true; command -v ethtool || true; command -v ip || true")
+        root = client.run_as_root("id -u")
+        if basic.exitCode != 0 or root.exitCode != 0 or root.stdout.strip() != "0":
+            raise RuntimeError(f"远端检查失败: {basic.stderr or root.stderr}")
+        lines = basic.stdout.splitlines()
+        return {
+            "os": lines[0] if len(lines) > 0 else "unknown",
+            "arch": lines[1] if len(lines) > 1 else "unknown",
+            "python": {"path": lines[2] if len(lines) > 2 else None, "version": lines[3] if len(lines) > 3 else None, "valid": bool(len(lines) > 3 and "3.7" in lines[3] or "3.8" in lines[3] or "3.9" in lines[3] or "3.10" in lines[3] or "3.11" in lines[3] or "3.12" in lines[3])},
+            "ethtool": {"installed": bool(len(lines) > 4 and lines[4])},
+            "iproute2": {"installed": bool(len(lines) > 5 and lines[5])},
+            "rootVerified": True,
+        }
+    finally:
+        client.close()
+
+
+def remote_json(client: SSHClient, command: str, root: bool = False) -> Any:
+    result = client.run_as_root(command) if root else client.run(command)
+    if result.exitCode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "远端命令执行失败")
+    return json.loads(result.stdout)
