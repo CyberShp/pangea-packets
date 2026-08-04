@@ -1,620 +1,270 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiGet, apiPost, executionStreamUrl } from "./api-contract";
+import {
+  apiGet,
+  apiPost,
+  apiPut,
+  executionStreamUrl,
+  ExecutionResult,
+  NicInfo,
+  PacketModel,
+  PacketPreview,
+  PacketTemplateSummary,
+  RemoteHostSummary,
+  ScenarioModel,
+  ValidationResult,
+} from "./api-contract";
 
-type Status = "可执行" | "有警告" | "未校验";
-type Mode = "直接模式" | "监听模式";
-type DrawerTab = "Hex" | "日志" | "校验问题" | "执行输出";
+type Page = "场景工作台" | "协议编辑器" | "异常用例" | "远端主机" | "执行结果";
+type Drawer = "Hex" | "校验问题" | "执行输出";
 
-type Packet = {
-  id: number;
-  enabled: boolean;
-  name: string;
-  template: string;
-  mutations: number;
-  count: number;
-  interval: string;
-  status: Status;
-};
+const pages: Page[] = ["场景工作台", "协议编辑器", "异常用例", "远端主机", "执行结果"];
 
-const initialPackets: Packet[] = [
-  {
-    id: 1,
-    enabled: true,
-    name: "baseline_tcp_syn",
-    template: "TCP / IPv4",
-    mutations: 0,
-    count: 1,
-    interval: "100 ms",
-    status: "可执行",
-  },
-  {
-    id: 2,
-    enabled: true,
-    name: "vxlan_len_skew",
-    template: "VXLAN / TCP",
-    mutations: 3,
-    count: 1,
-    interval: "100 ms",
-    status: "有警告",
-  },
-  {
-    id: 3,
-    enabled: false,
-    name: "truncated_payload",
-    template: "UDP / IPv4",
-    mutations: 1,
-    count: 5,
-    interval: "50 ms",
-    status: "未校验",
-  },
-];
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
-const nav = ["场景工作台", "协议编辑器", "异常用例", "监听模式", "远端主机", "执行结果", "设置"];
-const navGlyphs = ["▦", "⌘", "✦", "◉", "▣", "↗", "⚙"];
-const drawerTabs: DrawerTab[] = ["Hex", "日志", "校验问题", "执行输出"];
+function id(prefix: string): string {
+  return `${prefix}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function textOf(event: MessageEvent<string>): string {
+  try {
+    const data = JSON.parse(event.data) as { type?: string; data?: unknown };
+    return `${data.type ?? "event"}: ${typeof data.data === "string" ? data.data : JSON.stringify(data.data ?? {})}`;
+  } catch {
+    return event.data;
+  }
+}
 
 export default function App() {
-  const [activeNav, setActiveNav] = useState("场景工作台");
-  const [mode, setMode] = useState<Mode>("直接模式");
-  const [packets, setPackets] = useState(initialPackets);
-  const [selected, setSelected] = useState(2);
-  const [validated, setValidated] = useState(false);
-  const [drawer, setDrawer] = useState<DrawerTab>("Hex");
+  const [page, setPage] = useState<Page>("场景工作台");
+  const [drawer, setDrawer] = useState<Drawer>("Hex");
+  const [scenarios, setScenarios] = useState<ScenarioModel[]>([]);
+  const [scenario, setScenario] = useState<ScenarioModel | null>(null);
+  const [templates, setTemplates] = useState<PacketTemplateSummary[]>([]);
+  const [hosts, setHosts] = useState<RemoteHostSummary[]>([]);
+  const [interfaces, setInterfaces] = useState<NicInfo[]>([]);
+  const [executions, setExecutions] = useState<ExecutionResult[]>([]);
+  const [packetId, setPacketId] = useState("");
+  const [templateId, setTemplateId] = useState("");
+  const [preview, setPreview] = useState<PacketPreview | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [dirty, setDirty] = useState(false);
   const [running, setRunning] = useState(false);
-  const [scenarioId, setScenarioId] = useState<string | null>(null);
-  const [remoteLogs, setRemoteLogs] = useState<string[]>([]);
-  const [apiError, setApiError] = useState<string>("");
+  const [hostDraft, setHostDraft] = useState({ name: "lab-node-07", address: "192.168.1.100", sshPort: 22, username: "tester", password: "", rootPassword: "" });
+
+  const packet = useMemo(() => scenario?.packets.find((item) => item.id === packetId) ?? scenario?.packets[0] ?? null, [scenario, packetId]);
+  const host = useMemo(() => hosts.find((item) => item.id === scenario?.target.hostId), [hosts, scenario?.target.hostId]);
+  const enabled = scenario?.packets.filter((item) => item.enabled).length ?? 0;
+
+  async function load() {
+    setError("");
+    try {
+      const [scenarioRes, templateRes, hostRes, executionRes] = await Promise.all([
+        apiGet<{ items: ScenarioModel[] }>("/scenarios"),
+        apiGet<{ items: PacketTemplateSummary[] }>("/templates"),
+        apiGet<{ items: RemoteHostSummary[] }>("/hosts"),
+        apiGet<{ items: ExecutionResult[] }>("/executions"),
+      ]);
+      setScenarios(scenarioRes.items);
+      setTemplates(templateRes.items);
+      setHosts(hostRes.items);
+      setExecutions(executionRes.items);
+      const first = scenarioRes.items[0] ?? null;
+      setScenario(first);
+      setPacketId(first?.packets[0]?.id ?? "");
+      setTemplateId(templateRes.items[0]?.id ?? "");
+      setDirty(false);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "加载失败");
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
 
   useEffect(() => {
-    apiGet<{ items: Array<{ id: string; mode: "direct" | "listen"; packets: Array<{ id: string; enabled: boolean; name: string; templateId?: string; mutations: unknown[]; sendCount: number; intervalMs: number }> }> }>("/scenarios")
-      .then(({ items }) => {
-        const scenario = items[0];
-        if (!scenario) return;
-        setScenarioId(scenario.id);
-        setMode(scenario.mode === "listen" ? "监听模式" : "直接模式");
-        if (scenario.packets.length) {
-          setPackets(scenario.packets.map((packet, index) => ({
-            id: index + 1,
-            enabled: packet.enabled,
-            name: packet.name,
-            template: packet.templateId ?? "自定义模板",
-            mutations: packet.mutations.length,
-            count: packet.sendCount,
-            interval: `${packet.intervalMs} ms`,
-            status: "未校验",
-          })));
-          setSelected(1);
-        }
-      })
-      .catch((error: Error) => setApiError(`后端未连接：${error.message}`));
-  }, []);
+    if (!packet) { setPreview(null); return; }
+    let cancelled = false;
+    apiPost<PacketPreview>("/templates/preview", { packet })
+      .then((result) => { if (!cancelled) setPreview(result); })
+      .catch((exc: unknown) => { if (!cancelled) setError(exc instanceof Error ? exc.message : "预览失败"); });
+    return () => { cancelled = true; };
+  }, [packet]);
 
-  const selectedPacket = useMemo(
-    () => packets.find((packet) => packet.id === selected) ?? packets[0],
-    [packets, selected],
-  );
-  const enabled = packets.filter((packet) => packet.enabled).length;
+  function edit(mutator: (draft: ScenarioModel) => void) {
+    setScenario((current) => {
+      if (!current) return current;
+      const draft = clone(current);
+      mutator(draft);
+      setDirty(true);
+      setValidation(null);
+      return draft;
+    });
+  }
 
-  const togglePacket = (id: number) => {
-    setPackets((list) =>
-      list.map((packet) => (packet.id === id ? { ...packet, enabled: !packet.enabled } : packet)),
-    );
-  };
+  async function save(): Promise<ScenarioModel | null> {
+    if (!scenario) return null;
+    const saved = await apiPut<ScenarioModel>(`/scenarios/${scenario.id}`, scenario);
+    setScenario(saved);
+    setScenarios((items) => items.map((item) => item.id === saved.id ? saved : item));
+    setDirty(false);
+    return saved;
+  }
 
-  const addPacket = () => {
-    const id = Math.max(...packets.map((packet) => packet.id)) + 1;
-    setPackets([
-      ...packets,
-      {
-        id,
-        enabled: true,
-        name: `packet_${String(id).padStart(2, "0")}`,
-        template: "TCP / IPv4",
-        mutations: 0,
-        count: 1,
-        interval: "100 ms",
-        status: "未校验",
-      },
-    ]);
-    setSelected(id);
-  };
-
-  const validate = async () => {
-    if (!scenarioId) return;
-    setApiError("");
+  async function validate() {
+    if (!scenario) return;
     try {
-      const result = await apiPost<{ valid: boolean; errors: Array<{ message: string }>; warnings: Array<{ message: string }> }>(`/scenarios/${scenarioId}/validate`);
-      setValidated(result.valid);
-      setPackets((list) => list.map((packet) => ({ ...packet, status: result.valid ? (result.warnings.length ? "有警告" : "可执行") : "未校验" })));
-      if (!result.valid) setApiError(result.errors.map((item) => item.message).join("；"));
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "场景校验失败");
+      const target = dirty ? await save() : scenario;
+      if (!target) return;
+      const result = await apiPost<ValidationResult>(`/scenarios/${target.id}/validate`);
+      setValidation(result);
+      setDrawer("校验问题");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "校验失败");
     }
-  };
+  }
 
-  const execute = async () => {
-    if (!scenarioId) return;
+  function addPacket() {
+    const template = templates.find((item) => item.id === templateId) ?? templates[0];
+    if (!template) return;
+    const next: PacketModel = {
+      id: id("pkt"),
+      name: `${template.name}-${(scenario?.packets.length ?? 0) + 1}`,
+      enabled: true,
+      templateId: template.id,
+      sendCount: 1,
+      intervalMs: 100,
+      layers: clone(template.layers).map((layer, index) => ({ ...layer, id: `${layer.id}-${Date.now()}-${index}` })),
+      mutations: [],
+    };
+    edit((draft) => { draft.packets.push(next); });
+    setPacketId(next.id);
+  }
+
+  function addLengthMutation() {
+    if (!packet) return;
+    edit((draft) => {
+      const target = draft.packets.find((item) => item.id === packet.id);
+      const layer = target?.layers.find((item) => item.role === "outer" && item.type === "ipv4");
+      if (!target || !layer) return;
+      layer.autoCalculate = { ...(layer.autoCalculate ?? {}), len: false };
+      target.mutations.push({ id: id("mut"), name: "outer.ip.len less than actual", enabled: true, target: { packetId: target.id, layerId: layer.id, fieldPath: "outer.ipv4[0].len" }, type: "invalid_length", strategy: "less_than_actual", value: 40, applyOrder: 300, scope: "field", options: { disableAutoCalculate: true } });
+    });
+  }
+
+  function updateField(layerId: string, key: string, value: string) {
+    if (!packet) return;
+    edit((draft) => {
+      const target = draft.packets.find((item) => item.id === packet.id);
+      const layer = target?.layers.find((item) => item.id === layerId);
+      if (!layer) return;
+      const old = layer.fields[key];
+      const parsed = typeof old === "number" ? Number(value) : value;
+      layer.fields[key] = Number.isNaN(parsed) ? value : parsed;
+    });
+  }
+
+  async function saveHost() {
+    try {
+      const saved = await apiPost<RemoteHostSummary>("/hosts", { name: hostDraft.name, address: hostDraft.address, sshPort: hostDraft.sshPort, auth: { type: "password", username: hostDraft.username, password: hostDraft.password }, privilege: { mode: "su_root", rootPassword: hostDraft.rootPassword } });
+      setHosts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+      edit((draft) => { draft.target.hostId = saved.id; });
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "保存主机失败");
+    }
+  }
+
+  async function queryInterfaces() {
+    if (!scenario?.target.hostId) return;
+    try {
+      const result = await apiGet<{ items: NicInfo[] }>(`/hosts/${scenario.target.hostId}/interfaces`);
+      setInterfaces(result.items);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "查询网口失败");
+    }
+  }
+
+  async function disableOffload() {
+    if (!scenario?.target.hostId || !scenario.target.interface) return;
+    try {
+      const result = await apiPost<Record<string, unknown>>(`/hosts/${scenario.target.hostId}/interfaces/${encodeURIComponent(scenario.target.interface)}/offload`, { txChecksum: false, tso: false, gso: false, gro: false, lro: false });
+      setLogs((items) => [`offload: ${JSON.stringify(result)}`, ...items]);
+      setDrawer("执行输出");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "关闭 Offload 失败");
+    }
+  }
+
+  async function execute() {
+    if (!scenario) return;
     setRunning(true);
+    setLogs([]);
     setDrawer("执行输出");
-    setRemoteLogs([]);
-    setApiError("");
     try {
-      const result = await apiPost<{ executionId: string; status: string }>("/executions", { scenarioId });
+      const target = dirty ? await save() : scenario;
+      if (!target) return;
+      const result = await apiPost<{ executionId: string }>("/executions", { scenarioId: target.id });
       const socket = new WebSocket(executionStreamUrl(result.executionId));
-      socket.onmessage = (event) => setRemoteLogs((logs) => [...logs, event.data]);
-      socket.onerror = () => setApiError("执行日志连接失败");
-      socket.onclose = () => setRunning(false);
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "执行请求失败");
+      socket.onmessage = (event) => setLogs((items) => [...items, textOf(event)]);
+      socket.onerror = () => setError("执行日志连接失败");
+      socket.onclose = () => { setRunning(false); void apiGet<{ items: ExecutionResult[] }>("/executions").then((res) => setExecutions(res.items)); };
+    } catch (exc) {
       setRunning(false);
+      setError(exc instanceof Error ? exc.message : "执行失败");
     }
-  };
+  }
+
+  const mode = scenario?.mode === "listen" ? "监听模式" : "直接模式";
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">∿</span>
-          <span>
-            PACKET<span>LAB</span>
-          </span>
-          <small>异常报文生成器</small>
-        </div>
-        <div className="crumb">
-          <span>项目</span>
-          <b>edge-regression</b>
-          <i>/</i>
-          <span>场景</span>
-          <b>vxlan-integrity-suite</b>
-        </div>
-        <div className="top-status">
-          <span className="host-dot" />
-          <span>{scenarioId ? "已加载场景" : "等待后端"}</span>
-          <span className="divider" />
-          <span>ens5f0</span>
-          <span className="divider" />
-          <button
-            className="mode-badge"
-            onClick={() => setMode(mode === "直接模式" ? "监听模式" : "直接模式")}
-          >
-            {mode}⌄
-          </button>
-        </div>
-        <button className="run-button" disabled={!validated || running} onClick={execute}>
-          {running ? "执行中..." : "▶ 执行场景"}
-        </button>
+        <div className="brand"><span className="brand-mark">∿</span><span>PACKET<span>LAB</span></span><small>异常报文生成器</small></div>
+        <div className="crumb"><span>场景</span><b>{scenario?.name ?? "未加载"}</b><i>/</i><span>{dirty ? "未保存" : "已保存"}</span></div>
+        <div className="top-status"><span className="host-dot" /><span>{host ? `${host.name} / ${host.address}` : "未选择主机"}</span><span className="divider" /><span>{scenario?.target.interface ?? "未选择网口"}</span><span className="divider" /><button className="mode-badge">{mode}⌄</button></div>
+        <button className="run-button" disabled={!scenario || running} onClick={execute}>{running ? "执行中..." : "▶ 执行场景"}</button>
       </header>
 
-      <aside className="sidebar">
-        <div className="nav-group-label">工作区</div>
-        <nav>
-          {nav.map((item, index) => (
-            <button
-              key={item}
-              onClick={() => setActiveNav(item)}
-              className={`nav-item ${activeNav === item ? "active" : ""}`}
-            >
-              <span className="nav-glyph">{navGlyphs[index]}</span>
-              {item}
-              {item === "异常用例" && <em>4</em>}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="risk-card">
-            <span className="risk-icon">!</span>
-            <div>
-              <b>Offload 风险</b>
-              <p>TX checksum 已关闭</p>
-            </div>
-          </div>
-          <button className="help">? 使用指南</button>
-        </div>
-      </aside>
+      <aside className="sidebar"><div className="nav-group-label">工作区</div><nav>{pages.map((item) => <button key={item} onClick={() => setPage(item)} className={`nav-item ${page === item ? "active" : ""}`}>{item}</button>)}</nav><div className="sidebar-bottom"><button className="help" onClick={load}>↻ 刷新数据</button></div></aside>
 
       <section className="workspace">
-        {apiError && <div className="api-error">{apiError}</div>}
-        {activeNav === "场景工作台" ? (
-          <>
-            <div className="page-title">
-              <div>
-                <div className="eyebrow">SCENARIO / 014</div>
-                <h1>VXLAN 完整性回归</h1>
-                <p>验证隧道内外层长度、校验和与截断异常的处理行为</p>
-              </div>
-              <div className="head-actions">
-                <button className="quiet-button">⌘S 保存</button>
-                <button className="quiet-button" onClick={validate}>
-                  {validated ? "✓ 已校验" : "◇ 校验场景"}
-                </button>
-              </div>
-            </div>
-
-            <div className="mode-switch">
-              <button onClick={() => setMode("直接模式")} className={mode === "直接模式" ? "selected" : ""}>
-                ◉ 直接模式<span>主动构造并发送报文</span>
-              </button>
-              <button onClick={() => setMode("监听模式")} className={mode === "监听模式" ? "selected" : ""}>
-                ◌ 监听模式<span>匹配流量后触发注入</span>
-              </button>
-              <div className="mode-summary">
-                目标 <b>lab-node-07 / ens5f0</b> · {enabled} 个报文已启用
-              </div>
-            </div>
-
-            <div className="content-grid">
-              <section className="panel packets-panel">
-                <div className="panel-head">
-                  <div>
-                    <h2>报文序列</h2>
-                    <span>按顺序执行 · 可拖动排序</span>
-                  </div>
-                  <button className="add-button" onClick={addPacket}>
-                    ＋ 添加报文
-                  </button>
-                </div>
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>启用</th>
-                        <th>#</th>
-                        <th>报文名</th>
-                        <th>模板</th>
-                        <th>异常</th>
-                        <th>次数</th>
-                        <th>间隔</th>
-                        <th>状态</th>
-                        <th aria-label="操作" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {packets.map((packet) => (
-                        <tr
-                          onClick={() => setSelected(packet.id)}
-                          className={selected === packet.id ? "selected-row" : ""}
-                          key={packet.id}
-                        >
-                          <td>
-                            <button
-                              aria-label="切换报文"
-                              className={`check ${packet.enabled ? "checked" : ""}`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                togglePacket(packet.id);
-                              }}
-                            >
-                              {packet.enabled && "✓"}
-                            </button>
-                          </td>
-                          <td className="order">⠿ {packet.id}</td>
-                          <td>
-                            <b>{packet.name}</b>
-                          </td>
-                          <td>
-                            <span className="template">{packet.template}</span>
-                          </td>
-                          <td>
-                            <button
-                              className={packet.mutations ? "mutation" : "zero"}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setActiveNav("异常用例");
-                              }}
-                            >
-                              {packet.mutations}
-                            </button>
-                          </td>
-                          <td>{packet.count}</td>
-                          <td className="mono">{packet.interval}</td>
-                          <td>
-                            <StatusBadge status={packet.status} />
-                          </td>
-                          <td className="row-more">•••</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <footer className="table-footer">
-                  <span>
-                    {packets.length} 个报文 · {enabled} 个已启用
-                  </span>
-                  <span>
-                    总计 <b>7 次</b> 发送 · 约 0.6 秒
-                  </span>
-                </footer>
-              </section>
-
-              <aside className="config-stack">
-                <section className="panel config-panel">
-                  <div className="panel-head">
-                    <div>
-                      <h2>场景配置</h2>
-                      <span>运行环境与控制项</span>
-                    </div>
-                    <button className="icon-button">•••</button>
-                  </div>
-                  <Config label="目标主机" value="lab-node-07" />
-                  <Config label="发送网口" value="ens5f0 / 10GbE" />
-                  <Config label="循环次数" value="1" />
-                  <Config label="包间默认间隔" value="100 ms" />
-                  <div className="switch-row">
-                    <span>失败后停止</span>
-                    <button className="toggle on" aria-label="切换失败后停止">
-                      <i />
-                    </button>
-                  </div>
-                </section>
-                <section className="offload-card">
-                  <div>
-                    <span className="eyebrow">NIC OFFLOAD</span>
-                    <h3>校验和异常可控</h3>
-                    <p>硬件卸载已禁用，报文将按原始 bytes 发出。</p>
-                  </div>
-                  <span className="offload-ok">✓</span>
-                </section>
-              </aside>
-            </div>
-
-            <section className="panel selection-strip">
-              <div>
-                <span className="eyebrow">当前选择</span>
-                <h3>{selectedPacket.name}</h3>
-                <p>{selectedPacket.template} · 3 条异常规则</p>
-              </div>
-              <div className="protocol-steps">
-                <span>Ethernet</span>
-                <i>›</i>
-                <span>IPv4</span>
-                <i>›</i>
-                <span>UDP</span>
-                <i>›</i>
-                <span className="highlight">VXLAN</span>
-                <i>›</i>
-                <span>Inner TCP</span>
-              </div>
-              <button className="open-editor" onClick={() => setActiveNav("协议编辑器")}>
-                编辑协议 →
-              </button>
-            </section>
-          </>
-        ) : (
-          <OtherPage page={activeNav} onBack={() => setActiveNav("场景工作台")} />
-        )}
+        {error && <div className="api-error">{error}</div>}
+        {page === "场景工作台" && <Workbench scenario={scenario} scenarios={scenarios} templates={templates} packet={packet} packetId={packetId} templateId={templateId} validation={validation} enabled={enabled} setScenario={(idValue) => { const next = scenarios.find((item) => item.id === idValue) ?? null; setScenario(next); setPacketId(next?.packets[0]?.id ?? ""); setDirty(false); }} setTemplateId={setTemplateId} setPacketId={setPacketId} addPacket={addPacket} save={save} validate={validate} edit={edit} />}
+        {page === "协议编辑器" && <Protocol packet={packet} preview={preview} updateField={updateField} />}
+        {page === "异常用例" && <Mutations packet={packet} addLengthMutation={addLengthMutation} />}
+        {page === "远端主机" && <Hosts scenario={scenario} hosts={hosts} interfaces={interfaces} draft={hostDraft} setDraft={setHostDraft} edit={edit} saveHost={saveHost} queryInterfaces={queryInterfaces} disableOffload={disableOffload} />}
+        {page === "执行结果" && <ExecutionList executions={executions} />}
       </section>
 
-      <section className="drawer">
-        <div className="drawer-tabs">
-          {drawerTabs.map((tab) => (
-            <button key={tab} onClick={() => setDrawer(tab)} className={drawer === tab ? "active" : ""}>
-              {tab}
-              {tab === "校验问题" && <em>1</em>}
-            </button>
-          ))}
-          <span>⌃</span>
-        </div>
-        <div className="drawer-content">
-          {drawer === "Hex" ? (
-            <>
-              <div className="hex-label">
-                0000&nbsp; 0a 1b 2c 3d 4e 5f&nbsp; 02 42 ac 11 00 07&nbsp; 08 00&nbsp; 45 00
-                <br />
-                0010&nbsp; <mark>00 74</mark> 3f 2a 40 00&nbsp; 40 11 <mark>00 00</mark> c0 a8 01 14&nbsp; c0 a8
-                <br />
-                0020&nbsp; 01 19 12 b5 12 b5&nbsp; 00 60 f3 8c 08 00 00 00&nbsp; 00 00 2a 00
-              </div>
-              <div className="hex-legend">
-                <span>
-                  <i className="orange" />
-                  字段异常：outer.ip.len
-                </span>
-                <span>
-                  <i className="purple" />
-                  自动计算已覆盖：udp.chksum
-                </span>
-              </div>
-            </>
-          ) : (
-            <div className="output">
-              <span className="prompt">$</span>{" "}
-              {running
-                ? (remoteLogs[remoteLogs.length - 1] ?? "执行请求已提交，等待远端事件...")
-                : drawer === "执行输出"
-                  ? (remoteLogs[remoteLogs.length - 1] ?? "等待执行。场景校验通过后可启动。")
-                  : (apiError || "场景数据由后端 API 提供")}
-            </div>
-          )}
-        </div>
-      </section>
+      <section className="drawer"><div className="drawer-tabs">{(["Hex", "校验问题", "执行输出"] as Drawer[]).map((item) => <button key={item} onClick={() => setDrawer(item)} className={drawer === item ? "active" : ""}>{item}</button>)}<span>⌃</span></div><div className="drawer-content">{drawer === "Hex" && <Hex preview={preview} />}{drawer === "校验问题" && <Validation validation={validation} />}{drawer === "执行输出" && <Output logs={logs} />}</div></section>
     </main>
   );
 }
 
-function StatusBadge({ status }: { status: Status }) {
-  return (
-    <span className={`status ${status === "可执行" ? "ok" : status === "有警告" ? "warn" : "idle"}`}>
-      <i />
-      {status}
-    </span>
-  );
+function Workbench(props: { scenario: ScenarioModel | null; scenarios: ScenarioModel[]; templates: PacketTemplateSummary[]; packet: PacketModel | null; packetId: string; templateId: string; validation: ValidationResult | null; enabled: number; setScenario: (id: string) => void; setTemplateId: (id: string) => void; setPacketId: (id: string) => void; addPacket: () => void; save: () => Promise<ScenarioModel | null>; validate: () => void; edit: (mutator: (draft: ScenarioModel) => void) => void }) {
+  return <><div className="page-title"><div><div className="eyebrow">SCENARIO / API CONNECTED</div><h1>{props.scenario?.name ?? "未加载场景"}</h1><p>场景、模板、保存、校验、执行都走后端 API。</p></div><div className="head-actions"><select value={props.scenario?.id ?? ""} onChange={(event: { target: { value: string } }) => props.setScenario(event.target.value)}>{props.scenarios.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="quiet-button" onClick={() => void props.save()}>⌘S 保存</button><button className="quiet-button" onClick={props.validate}>◇ 校验</button></div></div><div className="mode-switch"><button className={props.scenario?.mode === "direct" ? "selected" : ""} onClick={() => props.edit((draft) => { draft.mode = "direct"; })}>◉ 直接模式<span>主动发包</span></button><button className={props.scenario?.mode === "listen" ? "selected" : ""} onClick={() => props.edit((draft) => { draft.mode = "listen"; draft.listenConfig ??= { interface: draft.target.interface ?? null, match: { mode: "outer_five_tuple", bpf: "tcp or udp" }, trigger: { packetIndex: 1, tcpFlags: [], delayMs: 0 }, direction: { mode: "host_to_array", derive: "same_direction" }, cachePolicy: { storePayload: false, persistToDisk: false, maxRecords: 1000 } }; })}>◌ 监听模式<span>匹配后注入</span></button><div className="mode-summary">启用 <b>{props.enabled}</b> 个报文 · {props.validation?.valid ? "校验通过" : "待校验"}</div></div><section className="panel packets-panel"><div className="panel-head"><div><h2>报文序列</h2><span>保存后写入 app-data/scenarios</span></div><div className="head-actions"><select value={props.templateId} onChange={(event: { target: { value: string } }) => props.setTemplateId(event.target.value)}>{props.templates.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button className="add-button" onClick={props.addPacket}>＋ 添加报文</button></div></div><div className="table-wrap"><table><thead><tr><th>启用</th><th>#</th><th>报文名</th><th>模板</th><th>异常</th><th>次数</th><th>间隔</th><th>状态</th></tr></thead><tbody>{(props.scenario?.packets ?? []).map((item, index) => <tr key={item.id} className={props.packetId === item.id ? "selected-row" : ""} onClick={() => props.setPacketId(item.id)}><td><button className={`check ${item.enabled ? "checked" : ""}`} onClick={(event: { stopPropagation: () => void }) => { event.stopPropagation(); props.edit((draft) => { const packet = draft.packets.find((p) => p.id === item.id); if (packet) packet.enabled = !packet.enabled; }); }}>{item.enabled ? "✓" : ""}</button></td><td className="order">⠿ {index + 1}</td><td><b>{item.name}</b></td><td><span className="template">{item.templateId ?? "custom"}</span></td><td>{item.mutations.length}</td><td>{item.sendCount}</td><td className="mono">{item.intervalMs} ms</td><td><span className="status idle"><i />{props.validation?.valid ? "可执行" : "未校验"}</span></td></tr>)}</tbody></table></div><footer className="table-footer"><span>{props.scenario?.packets.length ?? 0} 个报文</span><span>当前选择 <b>{props.packet?.name ?? "无"}</b></span></footer></section></>;
 }
 
-function Config({ label, value }: { label: string; value: string }) {
-  return (
-    <label className="config-row">
-      <span>{label}</span>
-      <button>
-        {value}
-        <b>⌄</b>
-      </button>
-    </label>
-  );
+function Protocol({ packet, preview, updateField }: { packet: PacketModel | null; preview: PacketPreview | null; updateField: (layerId: string, key: string, value: string) => void }) {
+  if (!packet) return <div className="other-page"><h1>请选择报文</h1></div>;
+  return <div className="other-page"><div className="page-title"><div><div className="eyebrow">PACKET / {packet.name}</div><h1>协议编辑器</h1><p>字段变更后实时调用后端 Scapy 预览。</p></div></div><div className="other-grid"><section className="panel other-main"><div className="detail-list">{packet.layers.map((layer) => <div className="detail-row" key={layer.id}><span className="row-marker" /><span><b>{layer.role} / {layer.type}</b><small>{Object.keys(layer.fields).join(", ")}</small></span><div className="field-grid">{Object.entries(layer.fields).map(([key, value]) => <label key={key}><small>{key}</small><input value={String(value ?? "")} onChange={(event: { target: { value: string } }) => updateField(layer.id, key, event.target.value)} /></label>)}</div></div>)}</div></section><aside className="panel inspector"><h2>Wire Preview</h2><p>{preview?.length ?? 0} bytes</p><pre>{preview?.hex ?? "等待预览"}</pre></aside></div></div>;
 }
 
-type PageContent = {
-  eyebrow: string;
-  title: string;
-  subtitle: string;
-  primary: string;
-  rows: [string, string, string][];
-};
-
-function OtherPage({ page, onBack }: { page: string; onBack: () => void }) {
-  const content: Record<string, PageContent> = {
-    协议编辑器: {
-      eyebrow: "PACKET / vxlan_len_skew",
-      title: "协议编辑器",
-      subtitle: "分层编辑字段，异常策略与 Hex bytes 实时联动。",
-      primary: "＋ 添加协议层",
-      rows: [
-        ["Ethernet", "src 02:42:ac:11:00:07", "14 bytes"],
-        ["IPv4", "total length 0x0074", "异常 1"],
-        ["UDP", "checksum auto", "8 bytes"],
-        ["VXLAN", "VNI 42", "8 bytes"],
-        ["Inner TCP", "flags SYN", "20 bytes"],
-      ],
-    },
-    异常用例: {
-      eyebrow: "MUTATIONS / vxlan_len_skew",
-      title: "异常用例",
-      subtitle: "组合字段级异常，并在执行前发现冲突。",
-      primary: "＋ 添加异常",
-      rows: [
-        ["长度异常", "outer.ip.len → less than actual", "Warning"],
-        ["Checksum 异常", "outer.ip.chksum → 0x0000", "Enabled"],
-        ["字段值异常", "inner.tcp.flags → SYN|FIN", "Enabled"],
-        ["截断异常", "payload → 32 bytes", "Disabled"],
-      ],
-    },
-    监听模式: {
-      eyebrow: "LISTEN / CONFIGURATION",
-      title: "监听模式",
-      subtitle: "匹配经过接口的流量，并按触发策略注入异常报文。",
-      primary: "应用监听规则",
-      rows: [
-        ["监听接口", "ens5f0", "Ready"],
-        ["BPF 粗过滤", "udp and port 4789", "Valid"],
-        ["VXLAN VNI", "42", "Inner match"],
-        ["触发条件", "匹配第 3 个包后发送", "Armed"],
-      ],
-    },
-    远端主机: {
-      eyebrow: "ENVIRONMENT / 2 HOSTS",
-      title: "远端主机",
-      subtitle: "管理执行节点、网口状态和硬件卸载配置。",
-      primary: "＋ 添加主机",
-      rows: [
-        ["lab-node-07", "10.42.0.17 · ens5f0", "Online"],
-        ["qa-injector-02", "10.42.0.22 · ens3f1", "Online"],
-        ["Offload 检查", "TX checksum / TSO / GSO", "Passed"],
-      ],
-    },
-    执行结果: {
-      eyebrow: "RUN / 2026-08-03 14:32",
-      title: "执行结果",
-      subtitle: "查看发包结果、远端日志与目标阵列响应摘要。",
-      primary: "导出报告",
-      rows: [
-        ["baseline_tcp_syn", "1 / 1 已发送", "Success"],
-        ["vxlan_len_skew", "1 / 1 已发送", "Warning"],
-        ["truncated_payload", "跳过：未启用", "Skipped"],
-        ["目标阵列处理", "未采集回执", "Unknown"],
-      ],
-    },
-    设置: {
-      eyebrow: "PREFERENCES",
-      title: "设置",
-      subtitle: "调整默认行为、编辑器密度与本地运行偏好。",
-      primary: "保存设置",
-      rows: [
-        ["界面密度", "标准（表格行高 36px）", "Active"],
-        ["执行前校验", "始终要求", "Enabled"],
-        ["保存 payload", "默认关闭", "Secure"],
-        ["本地日志保留", "7 天", "Active"],
-      ],
-    },
-  };
-  const view = content[page] ?? content.协议编辑器;
-
-  return (
-    <div className="other-page">
-      <div className="page-title">
-        <div>
-          <div className="eyebrow">{view.eyebrow}</div>
-          <h1>{view.title}</h1>
-          <p>{view.subtitle}</p>
-        </div>
-        <div className="head-actions">
-          <button className="quiet-button" onClick={onBack}>
-            ← 返回工作台
-          </button>
-          <button className="add-button">{view.primary}</button>
-        </div>
-      </div>
-      <div className="other-grid">
-        <section className="panel other-main">
-          <div className="panel-head">
-            <div>
-              <h2>{page === "异常用例" ? "规则列表" : page === "远端主机" ? "可用资源" : "配置概览"}</h2>
-              <span>最近更新于 14:32:09</span>
-            </div>
-            <button className="icon-button">筛选⌄</button>
-          </div>
-          <div className="detail-list">
-            {view.rows.map(([name, value, state]) => (
-              <button className="detail-row" key={name}>
-                <span className="row-marker" />
-                <span>
-                  <b>{name}</b>
-                  <small>{value}</small>
-                </span>
-                <em className={state === "Warning" || state === "Unknown" ? "warning" : ""}>{state}</em>
-                <i>→</i>
-              </button>
-            ))}
-          </div>
-        </section>
-        <aside className="panel inspector">
-          <div className="panel-head">
-            <div>
-              <h2>检查器</h2>
-              <span>当前环境</span>
-            </div>
-          </div>
-          <div className="inspector-content">
-            <span className="eyebrow">STATUS</span>
-            <strong>配置就绪</strong>
-            <p>修改将在保存后应用到当前场景。执行环境已连接，未发现阻断类问题。</p>
-            <div className="mini-rule" />
-            <div className="meta-line">
-              <span>远端主机</span>
-              <b>lab-node-07</b>
-            </div>
-            <div className="meta-line">
-              <span>网口</span>
-              <b>ens5f0</b>
-            </div>
-            <div className="meta-line">
-              <span>校验状态</span>
-              <b className="green">通过</b>
-            </div>
-          </div>
-        </aside>
-      </div>
-      <section className="panel activity-panel">
-        <div className="panel-head">
-          <div>
-            <h2>最近活动</h2>
-            <span>此工作区的变更记录</span>
-          </div>
-        </div>
-        <div className="activity">
-          <span>14:32:09</span>
-          <b>系统</b>
-          <p>已载入场景配置与远端环境摘要。</p>
-        </div>
-      </section>
-    </div>
-  );
+function Mutations({ packet, addLengthMutation }: { packet: PacketModel | null; addLengthMutation: () => void }) {
+  if (!packet) return <div className="other-page"><h1>请选择报文</h1></div>;
+  return <div className="other-page"><div className="page-title"><div><div className="eyebrow">MUTATIONS / {packet.name}</div><h1>异常用例</h1><p>规则保存后参与后端校验和 Scapy bytes 生成。</p></div><button className="add-button" onClick={addLengthMutation}>＋ 长度异常</button></div><section className="panel other-main"><div className="detail-list">{packet.mutations.map((item) => <div className="detail-row" key={item.id}><span className="row-marker" /><span><b>{item.name}</b><small>{item.target.fieldPath ?? item.scope} · {item.strategy}</small></span><em>{item.enabled ? "Enabled" : "Disabled"}</em></div>)}</div></section></div>;
 }
+
+function Hosts(props: { scenario: ScenarioModel | null; hosts: RemoteHostSummary[]; interfaces: NicInfo[]; draft: { name: string; address: string; sshPort: number; username: string; password: string; rootPassword: string }; setDraft: (value: { name: string; address: string; sshPort: number; username: string; password: string; rootPassword: string }) => void; edit: (mutator: (draft: ScenarioModel) => void) => void; saveHost: () => void; queryInterfaces: () => void; disableOffload: () => void }) {
+  return <div className="other-page"><div className="page-title"><div><div className="eyebrow">ENVIRONMENT / HOSTS</div><h1>远端主机</h1><p>SSH 登录、su root、网口发现和 Offload 控制。</p></div><div className="head-actions"><button className="add-button" onClick={props.saveHost}>保存主机</button><button className="quiet-button" onClick={props.queryInterfaces}>查询网口</button><button className="quiet-button" onClick={props.disableOffload}>关闭 Offload</button></div></div><div className="other-grid"><section className="panel other-main"><div className="detail-list">{props.hosts.map((host) => <button className="detail-row" key={host.id} onClick={() => props.edit((draft) => { draft.target.hostId = host.id; })}><span className="row-marker" /><span><b>{host.name}</b><small>{host.address}:{host.sshPort}</small></span><em>{props.scenario?.target.hostId === host.id ? "Selected" : "Saved"}</em></button>)}</div><div className="field-grid"><label>名称<input value={props.draft.name} onChange={(e: { target: { value: string } }) => props.setDraft({ ...props.draft, name: e.target.value })} /></label><label>地址<input value={props.draft.address} onChange={(e: { target: { value: string } }) => props.setDraft({ ...props.draft, address: e.target.value })} /></label><label>端口<input type="number" value={props.draft.sshPort} onChange={(e: { target: { value: string } }) => props.setDraft({ ...props.draft, sshPort: Number(e.target.value) })} /></label><label>用户<input value={props.draft.username} onChange={(e: { target: { value: string } }) => props.setDraft({ ...props.draft, username: e.target.value })} /></label><label>SSH 密码<input type="password" value={props.draft.password} onChange={(e: { target: { value: string } }) => props.setDraft({ ...props.draft, password: e.target.value })} /></label><label>root 密码<input type="password" value={props.draft.rootPassword} onChange={(e: { target: { value: string } }) => props.setDraft({ ...props.draft, rootPassword: e.target.value })} /></label></div></section><aside className="panel inspector">{props.interfaces.map((item) => <button className="detail-row" key={item.name} onClick={() => props.edit((draft) => { draft.target.interface = item.name; if (draft.listenConfig) draft.listenConfig.interface = item.name; })}><span><b>{item.name}</b><small>{item.ips.join(", ") || item.mac}</small></span><em>{item.link}</em></button>)}</aside></div></div>;
+}
+
+function ExecutionList({ executions }: { executions: ExecutionResult[] }) {
+  return <div className="other-page"><div className="page-title"><div><div className="eyebrow">RUN HISTORY</div><h1>执行结果</h1><p>Level0 脚本结果、Level1 TX 统计；Level2 旁路抓包后续接入。</p></div></div><section className="panel other-main"><div className="detail-list">{executions.map((item) => <div className="detail-row" key={item.id}><span className="row-marker" /><span><b>{item.id}</b><small>{item.interface ?? "no-iface"} · sent={String(item.level0.reportedSendCount ?? "?")} · txΔ={String(item.level1.txPacketsDelta ?? "?")}</small></span><em className={item.status === "failed" ? "warning" : ""}>{item.status}</em></div>)}</div></section></div>;
+}
+
+function Hex({ preview }: { preview: PacketPreview | null }) { return <div className="hex-label">{preview ? `${preview.hex}\n\n${preview.length} bytes` : "等待后端 Scapy 预览"}</div>; }
+function Validation({ validation }: { validation: ValidationResult | null }) { const rows = validation ? [...validation.errors, ...validation.warnings] : []; return <div className="output">{rows.length ? rows.map((item) => <p key={`${item.code}-${item.path ?? ""}`}>{item.code}: {item.message}</p>) : <p>{validation ? "校验通过" : "尚未校验"}</p>}</div>; }
+function Output({ logs }: { logs: string[] }) { return <div className="output"><span className="prompt">$</span>{logs.length ? logs.map((item, index) => <p key={`${index}-${item}`}>{item}</p>) : "等待执行"}</div>; }
