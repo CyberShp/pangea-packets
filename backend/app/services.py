@@ -19,7 +19,7 @@ from .models import (
     ValidationResult,
     new_id,
 )
-from .packet_engine import export_pcap, export_scapy_script
+from .packet_engine import export_pcap, export_scapy_script, preview_packet as render_packet_preview
 from .storage import EXECUTIONS_DIR, EXPORTS_DIR, HOSTS_FILE, SCENARIOS_DIR, TEMPLATES_DIR, read_json, write_json
 
 
@@ -89,22 +89,8 @@ def get_template(template_id: str) -> PacketTemplate:
 
 
 def preview_packet(packet: Packet) -> PacketPreview:
-    pseudo = bytearray()
-    offsets = []
-    cursor = 0
-    for layer in packet.layers:
-        layer_bytes = f"<{layer.role}:{layer.type}>".encode()
-        pseudo.extend(layer_bytes)
-        offsets.append({
-            "fieldPath": f"{layer.role}.{layer.type}[0]",
-            "startOffset": cursor,
-            "endOffset": cursor + len(layer_bytes),
-            "valueHex": layer_bytes.hex(),
-            "layerId": layer.id,
-            "fieldName": layer.type,
-        })
-        cursor += len(layer_bytes)
-    return PacketPreview(hex=pseudo.hex(" "), length=len(pseudo), fieldOffsets=offsets)
+    """Return the actual Scapy-rendered wire preview, not placeholder layer text."""
+    return render_packet_preview(packet)
 
 
 def mutation_default_order(mutation: Mutation) -> int:
