@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import struct
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 
 from .audit import record
-from .executor import run_direct, run_listen
+from .execution_jobs import ACTIVE_STATUSES, recover_executions, start_execution
 from .models import Mutation, Packet, RemoteHost, ScenarioCreate
 from .remote_ops import offload_command, parse_ethtool_k
 from .seed import seed_data
@@ -28,12 +30,10 @@ from .services import (
     list_hosts,
     list_scenarios,
     list_templates,
-    mock_interfaces,
     preview_packet,
     random_mutations,
     save_host,
     save_scenario,
-    start_mock_execution,
     validate_mutations,
     validate_scenario_obj,
 )
@@ -51,6 +51,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     seed_data()
+    recover_executions()
 
 
 def not_found(exc: KeyError) -> HTTPException:
@@ -87,6 +88,16 @@ def api_update_scenario(scenario_id: str, payload: dict[str, Any]):
         return save_scenario(scenario_id, payload)
     except KeyError as exc:
         raise not_found(exc)
+    except ValidationError as exc:
+        labels = {
+            "loopCount": "循环次数必须是至少为 1 的整数",
+            "sendCount": "发送次数必须是至少为 1 的整数",
+            "intervalMs": "发送间隔必须是至少为 0 的整数",
+        }
+        messages = [labels.get(str(error["loc"][-1]), f"配置字段 {'.'.join(map(str, error['loc']))} 无效") for error in exc.errors()]
+        raise HTTPException(status_code=422, detail={"message": "；".join(messages)})
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"message": str(exc)})
 
 
 @app.delete("/api/v1/scenarios/{scenario_id}")
@@ -130,8 +141,14 @@ def api_get_template(template_id: str):
 
 @app.post("/api/v1/templates/preview")
 def api_preview_template(payload: dict[str, Any]):
-    packet = Packet.model_validate(payload.get("packet", payload))
-    return preview_packet(packet)
+    try:
+        packet = Packet.model_validate(payload.get("packet", payload))
+        validation = validate_mutations(packet, packet.mutations)
+        if not validation.valid:
+            raise ValueError("；".join(error.message for error in validation.errors))
+        return preview_packet(packet)
+    except (ValueError, TypeError, OSError, RuntimeError, OverflowError, struct.error) as exc:
+        raise HTTPException(status_code=422, detail={"message": f"报文构造失败：{exc}"})
 
 
 @app.get("/api/v1/mutation-types")
@@ -288,7 +305,7 @@ def api_stats(host_id: str, iface: str):
         raise HTTPException(status_code=400, detail={"code": "NIC_STATS_FAILED", "message": str(exc)})
 
 
-@app.post("/api/v1/executions")
+@app.post("/api/v1/executions", status_code=202)
 def api_start_execution(payload: dict[str, Any]):
     try:
         scenario = get_scenario(payload["scenarioId"])
@@ -298,9 +315,11 @@ def api_start_execution(payload: dict[str, Any]):
         if not scenario.target.hostId:
             raise HTTPException(status_code=422, detail={"code": "TARGET_HOST_REQUIRED", "message": "场景未选择目标主机"})
         host = get_host(scenario.target.hostId)
-        execution = run_listen(scenario, host) if scenario.mode == "listen" else run_direct(scenario, host)
+        execution = start_execution(scenario, host)
     except KeyError as exc:
         raise not_found(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"message": str(exc)})
     return {"executionId": execution.id, "status": execution.status}
 
 
@@ -330,13 +349,22 @@ def api_get_logs(execution_id: str):
 async def execution_stream(websocket: WebSocket, execution_id: str):
     await websocket.accept()
     try:
-        execution = get_execution(execution_id)
-        await websocket.send_json({"type": "execution_started", "data": {"executionId": execution.id, "status": execution.status}})
-        for log in execution.logs:
-            await websocket.send_json(log)
-            await asyncio.sleep(0.02)
-        await websocket.send_json({"type": "execution_finished", "data": {"status": execution.status, "level0": execution.level0, "level1": execution.level1}})
+        previous = None
+        while True:
+            execution = await asyncio.to_thread(get_execution, execution_id)
+            snapshot = execution.model_dump(mode="json")
+            if snapshot != previous:
+                await websocket.send_json({"type": "execution_updated", "data": snapshot})
+                previous = snapshot
+            if execution.status not in ACTIVE_STATUSES:
+                break
+            await asyncio.sleep(0.3)
     except KeyError:
         await websocket.send_json({"type": "execution_failed", "data": {"code": "EXECUTION_NOT_FOUND"}})
+    except WebSocketDisconnect:
+        return
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass

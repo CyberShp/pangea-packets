@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from random import sample
+import struct
 from typing import Any
 
 from .models import (
     ErrorDetail,
     ExecutionResult,
     Mutation,
-    NicInfo,
-    OffloadState,
     Packet,
-    PacketPreview,
     PacketTemplate,
     RemoteHost,
     Scenario,
@@ -19,7 +18,7 @@ from .models import (
     ValidationResult,
     new_id,
 )
-from .packet_engine import export_pcap, export_scapy_script
+from .packet_engine import export_pcap, export_scapy_script, preview_packet
 from .storage import EXECUTIONS_DIR, EXPORTS_DIR, HOSTS_FILE, SCENARIOS_DIR, TEMPLATES_DIR, read_json, write_json
 
 
@@ -44,6 +43,14 @@ def save_scenario(scenario_id: str, payload: dict[str, Any]) -> Scenario:
     current = get_scenario(scenario_id)
     merged = current.model_dump(mode="json") | payload | {"id": scenario_id, "updatedAt": datetime.utcnow().isoformat()}
     scenario = Scenario.model_validate(merged)
+    for packet in scenario.packets:
+        validation = validate_mutations(packet, packet.mutations)
+        if not validation.valid:
+            raise ValueError("；".join(error.message for error in validation.errors))
+        try:
+            preview_packet(packet)
+        except (ValueError, TypeError, OSError, RuntimeError, OverflowError, struct.error) as exc:
+            raise ValueError(f"报文 {packet.name} 无法构造：{exc}") from exc
     write_json(SCENARIOS_DIR / f"{scenario.id}.json", scenario.model_dump(mode="json"))
     return scenario
 
@@ -62,6 +69,10 @@ def validate_scenario_obj(scenario: Scenario) -> ValidationResult:
     if scenario.mode == "listen" and scenario.listenConfig is None:
         errors.append(ErrorDetail(code="LISTEN_CONFIG_REQUIRED", message="监听模式需要配置监听规则", path="listenConfig"))
     for packet_index, packet in enumerate(scenario.packets):
+        try:
+            preview_packet(packet)
+        except (ValueError, TypeError, OSError, RuntimeError, OverflowError, struct.error) as exc:
+            errors.append(ErrorDetail(code="PACKET_BUILD_FAILED", message=f"报文 {packet.name} 无法构造：{exc}", path=f"packets[{packet_index}]"))
         result = validate_mutations(packet, packet.mutations)
         for err in result.errors:
             err.path = err.path or f"packets[{packet_index}].mutations"
@@ -86,25 +97,6 @@ def get_template(template_id: str) -> PacketTemplate:
         if path.exists():
             return PacketTemplate.model_validate(read_json(path, {}))
     raise KeyError("TEMPLATE_NOT_FOUND")
-
-
-def preview_packet(packet: Packet) -> PacketPreview:
-    pseudo = bytearray()
-    offsets = []
-    cursor = 0
-    for layer in packet.layers:
-        layer_bytes = f"<{layer.role}:{layer.type}>".encode()
-        pseudo.extend(layer_bytes)
-        offsets.append({
-            "fieldPath": f"{layer.role}.{layer.type}[0]",
-            "startOffset": cursor,
-            "endOffset": cursor + len(layer_bytes),
-            "valueHex": layer_bytes.hex(),
-            "layerId": layer.id,
-            "fieldName": layer.type,
-        })
-        cursor += len(layer_bytes)
-    return PacketPreview(hex=pseudo.hex(" "), length=len(pseudo), fieldOffsets=offsets)
 
 
 def mutation_default_order(mutation: Mutation) -> int:
@@ -138,11 +130,19 @@ def validate_mutations(packet: Packet, mutations: list[Mutation]) -> ValidationR
             errors.append(ErrorDetail(code="MUTATION_DUPLICATE_ORDER", message="同一字段存在相同执行顺序的重复异常", path=mutation.id))
         seen.add(key)
         field_path = mutation.target.fieldPath or ""
+        if mutation.type in {"invalid_length", "invalid_checksum"}:
+            field = "len" if mutation.type == "invalid_length" else "chksum"
+            types = {"ipv4", "udp"} if field == "len" else {"ipv4", "tcp", "udp"}
+            targets = [layer for layer in packet.layers if layer.type in types and field_path == f"{layer.role}.{layer.type}[0].{field}"]
+            if not targets or (mutation.target.layerId and all(layer.id != mutation.target.layerId for layer in targets)):
+                errors.append(ErrorDetail(code="MUTATION_TARGET_INVALID", message=f"规则 {mutation.name} 的目标字段不匹配", path=mutation.id))
+            if mutation.value is None:
+                errors.append(ErrorDetail(code="MUTATION_VALUE_REQUIRED", message=f"请填写规则 {mutation.name} 的异常值", path=mutation.id))
         if mutation.type == "invalid_checksum":
-            if auto_calc.get(field_path, False):
+            if auto_calc.get(field_path, False) and not mutation.options.get("disableAutoCalculate"):
                 errors.append(ErrorDetail(code="CHECKSUM_AUTO_CALC_CONFLICT", message="checksum 自动计算与 checksum 异常冲突", path=mutation.id))
             warnings.append(ErrorDetail(code="OFFLOAD_RISK", message="checksum 异常可能被 TX checksum offload 修正", path=mutation.id))
-        if mutation.type == "invalid_length" and auto_calc.get(field_path, False):
+        if mutation.type == "invalid_length" and auto_calc.get(field_path, False) and not mutation.options.get("disableAutoCalculate"):
             errors.append(ErrorDetail(code="LENGTH_AUTO_CALC_CONFLICT", message="length 自动计算与 length 异常冲突", path=mutation.id))
         if mutation.type == "truncate_packet":
             warnings.append(ErrorDetail(code="TRUNCATE_WIRE_RISK", message="普通网卡可能自动补齐或丢弃过短帧", path=mutation.id))
@@ -155,13 +155,13 @@ def random_mutations(packet: Packet, count: int, allowed_types: list[str] | None
     for layer in packet.layers:
         for field in layer.fields:
             field_path = f"{layer.role}.{layer.type}[0].{field}"
-            if "invalid_length" in allowed and field in {"len", "plen", "dataSegmentLength"}:
-                candidates.append(Mutation(name=f"{field_path} invalid length", target={"layerId": layer.id, "fieldPath": field_path}, type="invalid_length", strategy="less_than_actual", value=40, applyOrder=300, options={"disableAutoCalculate": True}))
-            if "invalid_checksum" in allowed and field in {"chksum"}:
+            if "invalid_length" in allowed and layer.type in {"ipv4", "udp"} and field == "len":
+                candidates.append(Mutation(name=f"{field_path} 长度异常", target={"layerId": layer.id, "fieldPath": field_path}, type="invalid_length", strategy="custom", value=40, applyOrder=300, options={"disableAutoCalculate": True}))
+            if "invalid_checksum" in allowed and layer.type in {"ipv4", "tcp", "udp"} and field == "chksum":
                 candidates.append(Mutation(name=f"{field_path} invalid checksum", target={"layerId": layer.id, "fieldPath": field_path}, type="invalid_checksum", strategy="custom", value=0x1234, applyOrder=500, options={"disableAutoCalculate": True}))
-    if "inner_outer_mismatch" in allowed:
+    if "inner_outer_mismatch" in allowed and any(layer.type == "vxlan" for layer in packet.layers) and any(layer.type == "ipv4" and layer.role == "inner" for layer in packet.layers):
         candidates.append(Mutation(name="VXLAN inner src ip equals dst ip", type="inner_outer_mismatch", strategy="inner_src_equals_dst", applyOrder=300, scope="packet"))
-    return candidates[:count]
+    return sample(candidates, min(max(count, 0), len(candidates)))
 
 
 def list_hosts() -> list[RemoteHost]:
@@ -182,29 +182,6 @@ def save_host(payload: dict[str, Any]) -> RemoteHost:
     hosts.append(host.model_dump(mode="json"))
     write_json(HOSTS_FILE, hosts)
     return host
-
-
-def mock_interfaces() -> list[NicInfo]:
-    return [
-        NicInfo(name="ens5f0", mac="00:11:22:33:44:55", ips=["192.168.1.10"], link="up", speed="10000Mb/s", driver="ixgbe", pci="0000:03:00.0", offload=OffloadState(), stats={"txPackets": 1000, "txErrors": 0}),
-        NicInfo(name="ens5f1", mac="00:11:22:33:44:56", ips=[], link="down", speed="unknown", driver="ixgbe", pci="0000:03:00.1", offload=OffloadState(), stats={"txPackets": 0, "txErrors": 0}),
-    ]
-
-
-def start_mock_execution(scenario: Scenario) -> ExecutionResult:
-    execution = ExecutionResult(
-        scenarioId=scenario.id,
-        mode=scenario.mode,
-        hostId=scenario.target.hostId,
-        interface=scenario.target.interface,
-        status="success",
-        finishedAt=datetime.utcnow(),
-        level0={"exitCode": 0, "scriptSuccess": True, "reportedSendCount": sum(p.sendCount for p in scenario.packets if p.enabled), "stderr": ""},
-        level1={"txPacketsBefore": 1000, "txPacketsAfter": 1000 + sum(p.sendCount for p in scenario.packets if p.enabled), "txErrorsBefore": 0, "txErrorsAfter": 0, "ethtoolStatsDiff": {"tx_packets": sum(p.sendCount for p in scenario.packets if p.enabled), "tx_errors": 0}},
-        logs=[{"type": "stage_changed", "message": "mock execution completed"}],
-    )
-    write_json(EXECUTIONS_DIR / execution.id / "execution.json", execution.model_dump(mode="json"))
-    return execution
 
 
 def list_executions() -> list[ExecutionResult]:

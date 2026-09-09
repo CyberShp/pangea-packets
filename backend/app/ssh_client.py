@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import posixpath
 import shlex
+import codecs
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import paramiko
 
@@ -46,10 +48,9 @@ class SSHClient:
 
     def run(self, command: str, timeout: int = 60) -> RemoteResult:
         stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        return RemoteResult(exit_code, stdout.read().decode(), stderr.read().decode())
+        return self._collect(stdout.channel, timeout)
 
-    def run_as_root(self, command: str, timeout: int = 60) -> RemoteResult:
+    def run_as_root(self, command: str, timeout: int = 60, on_output: Callable[[str, str], None] | None = None) -> RemoteResult:
         root_password = self.host.privilege.rootPassword
         if not root_password:
             raise RuntimeError("未配置 su root 密码")
@@ -57,8 +58,48 @@ class SSHClient:
         stdin, stdout, stderr = self.client.exec_command(wrapped, timeout=timeout, get_pty=True)
         stdin.write(root_password + "\n")
         stdin.flush()
-        exit_code = stdout.channel.recv_exit_status()
-        return RemoteResult(exit_code, stdout.read().decode(), stderr.read().decode())
+        return self._collect(stdout.channel, timeout, on_output)
+
+    def _collect(self, channel, timeout: int, on_output: Callable[[str, str], None] | None = None) -> RemoteResult:
+        deadline = time.monotonic() + timeout
+        decoders = {kind: codecs.getincrementaldecoder("utf-8")("replace") for kind in ("remote_stdout", "remote_stderr")}
+        output = {kind: [] for kind in decoders}
+        pending = {kind: "" for kind in decoders}
+        secrets = [value for value in (self.host.auth.password, self.host.privilege.rootPassword) if value]
+
+        def clean(text: str) -> str:
+            for secret in secrets:
+                text = text.replace(secret, "[已隐藏]")
+            return text
+
+        def consume(kind: str, text: str, final: bool = False) -> None:
+            output[kind].append(text)
+            pending[kind] += text
+            while "\n" in pending[kind]:
+                line, pending[kind] = pending[kind].split("\n", 1)
+                if on_output and line.strip():
+                    on_output(kind, clean(line.rstrip("\r")))
+            if final and pending[kind] and on_output:
+                on_output(kind, clean(pending[kind]))
+
+        try:
+            while True:
+                received = False
+                for kind, ready, read in (("remote_stdout", channel.recv_ready, channel.recv), ("remote_stderr", channel.recv_stderr_ready, channel.recv_stderr)):
+                    if ready():
+                        consume(kind, decoders[kind].decode(read(32768)))
+                        received = True
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"远端命令超过 {timeout} 秒仍未结束，请核对远端执行状态")
+                if not received:
+                    time.sleep(0.03)
+            for kind, decoder in decoders.items():
+                consume(kind, decoder.decode(b"", final=True), final=True)
+            return RemoteResult(channel.recv_exit_status(), clean("".join(output["remote_stdout"])), clean("".join(output["remote_stderr"])))
+        finally:
+            channel.close()
 
     def upload(self, local_path: Path, remote_path: str) -> None:
         sftp = self.client.open_sftp()

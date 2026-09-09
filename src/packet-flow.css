@@ -1,0 +1,201 @@
+.packet-next-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  background: #25271f;
+  border: 1px solid #4f5038;
+  border-radius: 5px;
+  font-size: 12px;
+  color: #dbccaf;
+}
+.packet-next-step b {
+  margin-right: 12px;
+  color: #f3b87d;
+}
+.packet-next-step > div {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.manual-mutation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 18px;
+  background: #222a31;
+  border: 1px solid #47515c;
+  border-radius: 5px;
+  margin-bottom: 22px;
+  font-size: 12px;
+}
+.manual-mutation label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.manual-mutation select {
+  background: #12181f;
+  color: #e3e9ee;
+  border: 1px solid #55616c;
+  padding: 9px;
+  border-radius: 4px;
+}
+.manual-mutation > span {
+  color: #aeb7bf;
+  font-size: 11px;
+}
+.packet-confirm {
+  max-width: 620px;
+  width: calc(100% - 32px);
+  max-height: 90vh;
+  color: #e4ebf2;
+  background: #1c232c;
+  border: 1px solid #59636e;
+  border-radius: 8px;
+  padding: 28px;
+  box-shadow: 0 20px 90px #000b;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.packet-confirm::backdrop {
+  background: #080b10bf;
+}
+.packet-confirm h2 {
+  font-size: 20px;
+}
+.packet-confirm dl {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 12px;
+  padding: 18px;
+  background: #11181e;
+}
+.packet-confirm dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.packet-confirm label {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.packet-confirm input {
+  margin-top: 6px;
+}
+.packet-confirm footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+.platform-root .app-shell {
+  min-height: calc(100vh - 64px);
+}
+body {
+  min-width: 320px;
+}
+.listen-editor {
+  margin-top: 24px;
+}
+.listen-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  padding: 20px;
+}
+.listen-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.listen-editor > .editor-hint {
+  padding: 0 20px 16px;
+}
+@media (max-width: 600px) {
+  .listen-fields {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 1000px) {
+  .app-shell .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 14px;
+    gap: 12px;
+  }
+  .app-shell {
+    grid-template-rows: auto 1fr 174px;
+  }
+  .app-shell .top-status {
+    margin-left: 0;
+  }
+  .app-shell .content-grid,
+  .app-shell .other-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .app-shell .page-title {
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .app-shell .table-wrap {
+    overflow-x: auto;
+  }
+}
+@media (max-width: 600px) {
+  .app-shell .crumb {
+    display: none;
+  }
+  .app-shell .top-status {
+    flex-wrap: wrap;
+  }
+  .app-shell .brand {
+    width: auto;
+  }
+  .app-shell .brand small {
+    display: none;
+  }
+  .app-shell .topbar {
+    align-items: center;
+  }
+  .app-shell .scene-tabs > select {
+    max-width: 100%;
+  }
+  .app-shell .scene-context select {
+    max-width: 100%;
+  }
+  .app-shell .scene-context label {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .app-shell .host-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .manual-mutation label {
+    flex-wrap: wrap;
+  }
+  .packet-next-step > div {
+    width: 100%;
+  }
+  .app-shell .page-title h1 {
+    font-size: 22px;
+    overflow-wrap: anywhere;
+  }
+  .app-shell .workspace {
+    min-width: 0;
+  }
+  .app-shell .config-row {
+    gap: 12px;
+  }
+  .app-shell .scene-context form input {
+    width: 55%;
+  }
+  .app-shell .save-bar {
+    flex-wrap: wrap;
+  }
+}

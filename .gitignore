@@ -6,6 +6,8 @@
 *.key
 node_modules/
 dist/
+build/
+release/
 output/
 .playwright-cli/
 *.tsbuildinfo

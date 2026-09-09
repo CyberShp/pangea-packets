@@ -46,12 +46,27 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+  return apiWrite<T>('POST', path, body);
+}
+
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  return apiWrite<T>('PUT', path, body);
+}
+
+async function apiWrite<T>(method: 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
   });
-  if (!response.ok) throw new Error(`API ${path} failed: ${response.status}`);
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    const detail = error?.detail;
+    const message = typeof detail === 'string' ? detail
+      : Array.isArray(detail) ? detail.map((item: { msg?: string }) => item.msg).join('；')
+      : detail?.message;
+    throw new Error(message || `请求失败：${response.status}`);
+  }
   return response.json() as Promise<T>;
 }
 

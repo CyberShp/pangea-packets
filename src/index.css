@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap");
 
 :root {
   color: #e6edf3;
@@ -118,6 +117,11 @@ button:focus-visible {
   border-radius: 50%;
   background: #3fb950;
   box-shadow: 0 0 10px #3fb950;
+}
+
+.host-dot.error {
+  background: #ff5c5c;
+  box-shadow: 0 0 10px #ff5c5c;
 }
 
 .divider {

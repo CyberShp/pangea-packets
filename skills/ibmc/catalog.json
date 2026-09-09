@@ -1,0 +1,16 @@
+{
+  "package": "ibmc-security-foundations",
+  "version": "0.1.0",
+  "mode": "design-and-evidence-review",
+  "runtimeIntegrated": false,
+  "sharedInstructions": "contract.md",
+  "sources": "sources.md",
+  "skills": [
+    {"id": "ibmc-product-intake", "entrypoint": "ibmc-product-intake/SKILL.md", "output": "product-inventory"},
+    {"id": "ibmc-attack-surface", "entrypoint": "ibmc-attack-surface/SKILL.md", "output": "surface-inventory"},
+    {"id": "ibmc-risk-paths", "entrypoint": "ibmc-risk-paths/SKILL.md", "output": "risk-and-path-plan"},
+    {"id": "ibmc-web-test-design", "entrypoint": "ibmc-web-test-design/SKILL.md", "output": "test-cases"},
+    {"id": "ibmc-firmware-test-design", "entrypoint": "ibmc-firmware-test-design/SKILL.md", "output": "test-cases"},
+    {"id": "ibmc-evidence-review", "entrypoint": "ibmc-evidence-review/SKILL.md", "output": "results-and-retest"}
+  ]
+}

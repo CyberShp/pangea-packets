@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-APP_DATA = ROOT / "app-data"
+ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
+APP_DATA = Path(os.environ.get("PANGEA_DATA_DIR", str(ROOT / "app-data"))).resolve()
 SCENARIOS_DIR = APP_DATA / "scenarios"
 TEMPLATES_DIR = APP_DATA / "templates"
 HOSTS_FILE = APP_DATA / "hosts" / "hosts.json"

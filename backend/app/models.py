@@ -47,7 +47,7 @@ class TargetRef(BaseModel):
 
 
 class SendOptions(BaseModel):
-    loopCount: int = 1
+    loopCount: int = Field(default=1, ge=1)
     stopOnFailure: bool = True
 
 
@@ -83,8 +83,8 @@ class Packet(BaseModel):
     name: str
     enabled: bool = True
     templateId: str | None = None
-    sendCount: int = 1
-    intervalMs: int = 100
+    sendCount: int = Field(default=1, ge=1)
+    intervalMs: int = Field(default=100, ge=0)
     layers: list[PacketLayer] = Field(default_factory=list)
     mutations: list[Mutation] = Field(default_factory=list)
 

@@ -53,6 +53,7 @@ def _mutate_layer_fields(packet: Packet) -> None:
 
 
 def build_scapy_packet(packet: Packet):
+    packet = packet.model_copy(deep=True)
     Ether, IP, TCP, UDP, Raw, VXLAN, _ = _scapy()
     _mutate_layer_fields(packet)
     outer_eth = _layer(packet, "ethernet", "outer")
@@ -85,6 +86,36 @@ def build_scapy_packet(packet: Packet):
     if isinstance(raw, str):
         raw = raw.encode()
     frame /= Raw(raw)
+
+    wire_layers = {("outer", "ethernet"): frame[Ether], ("outer", "ipv4"): frame[IP]}
+    wire_layers[("outer", "udp" if tunnel or not outer_tcp else "tcp")] = frame[IP].payload
+    if tunnel:
+        inner_frame = frame[VXLAN].payload
+        wire_layers.update({
+            ("tunnel", "vxlan"): frame[VXLAN],
+            ("inner", "ethernet"): inner_frame,
+            ("inner", "ipv4"): inner_frame[IP],
+            ("inner", "tcp" if inner_tcp else "udp"): inner_frame[IP].payload,
+        })
+    for layer in packet.layers:
+        wire = wire_layers.get((layer.role, layer.type))
+        if wire is None:
+            continue
+        available = {field.name for field in wire.fields_desc}
+        for name, value in layer.fields.items():
+            if layer.autoCalculate.get(name, False):
+                continue
+            if name not in available:
+                raise ValueError(f"{layer.role}.{layer.type}.{name} 尚不支持构造")
+            if value is None:
+                if name in layer.autoCalculate:
+                    raise ValueError(f"请填写 {layer.role}.{layer.type}.{name}，或启用自动计算")
+                continue
+            if name == "reserved1" and isinstance(value, str):
+                value = int(value, 16)
+            elif isinstance(value, str) and name not in {"src", "dst", "flags", "options"}:
+                value = int(value, 16 if value.lower().startswith("0x") else 10)
+            wire.setfieldval(name, value)
 
     for mutation in _enabled(packet, "invalid_length"):
         target = mutation.target.fieldPath or ""
@@ -138,6 +169,9 @@ def final_bytes(packet: Packet) -> bytes:
 def preview_packet(packet: Packet) -> PacketPreview:
     raw = final_bytes(packet)
     warnings: list[ErrorDetail] = []
+    for layer in packet.layers:
+        if layer.type not in {"ethernet", "ipv4", "tcp", "udp", "vxlan", "raw_payload"}:
+            warnings.append(ErrorDetail(code="UNSUPPORTED_LAYER", message=f"{layer.type} 尚未实现完整构造，当前仅生成基础报文"))
     offsets: list[FieldOffset] = []
     # Fixed header fields are measured from the actual serialized packet, not placeholder text.
     if len(raw) >= 34:
@@ -175,6 +209,7 @@ def main():
     args = parser.parse_args()
     frames = []
     sent = 0
+    last_progress = time.monotonic()
     socket = None if args.dry_run else conf.L2socket(iface=args.iface)
     try:
         for _ in range(int(SCENARIO.get('sendOptions', {{}}).get('loopCount', 1))):
@@ -187,11 +222,14 @@ def main():
                 for _ in range(int(packet.get('sendCount', 1))):
                     if socket is not None: socket.send(raw)
                     sent += 1
+                    if time.monotonic() - last_progress >= 1:
+                        print(json.dumps({{'event':'send_progress','reportedSendCount':sent}}), flush=True)
+                        last_progress = time.monotonic()
                     time.sleep(int(packet.get('intervalMs', 0)) / 1000)
     finally:
         if socket is not None: socket.close()
     if args.pcap: wrpcap(args.pcap, frames)
-    print(json.dumps({{'event':'send_complete','reportedSendCount':sent}}))
+    print(json.dumps({{'event':'send_complete','reportedSendCount':sent}}), flush=True)
 if __name__ == '__main__': main()
 '''
 
