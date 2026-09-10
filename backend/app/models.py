@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ScenarioMode = Literal["direct", "listen"]
 ExecutionStatus = Literal["pending", "running", "success", "failed", "cancelled"]
@@ -87,6 +87,17 @@ class Packet(BaseModel):
     intervalMs: int = Field(default=100, ge=0)
     layers: list[PacketLayer] = Field(default_factory=list)
     mutations: list[Mutation] = Field(default_factory=list)
+    rawHex: str | None = None
+
+    @field_validator('rawHex')
+    @classmethod
+    def valid_raw(cls, value):
+        if value is not None:
+            raw = bytes.fromhex(value)
+            if not 14 <= len(raw) <= 65535:
+                raise ValueError('原始 Ethernet 报文长度必须为 14–65535 字节')
+            return raw.hex()
+        return value
 
 
 class FiveTuple(BaseModel):
@@ -112,14 +123,16 @@ class ListenMatch(BaseModel):
 
 
 class ListenTrigger(BaseModel):
-    packetIndex: int = 1
+    packetIndex: int = Field(default=1, ge=1, le=100000)
     tcpFlags: list[str] = Field(default_factory=list)
-    delayMs: int = 0
+    delayMs: int = Field(default=0, ge=0, le=60000)
 
 
 class ListenDirection(BaseModel):
     mode: DirectionMode = "host_to_array"
     derive: Literal["same_direction", "reverse_direction", "none"] = "same_direction"
+    addresses: Literal['preserve', 'same_direction', 'reverse_direction'] = 'preserve'
+    checksums: Literal['preserve', 'repair'] = 'preserve'
 
 
 class CachePolicy(BaseModel):
@@ -162,6 +175,7 @@ class PacketTemplate(BaseModel):
     builtin: bool = True
     description: str = ""
     layers: list[PacketLayer]
+    packet: Packet | None = None
 
 
 class FieldOffset(BaseModel):

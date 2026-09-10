@@ -60,6 +60,13 @@ def main():
                         for kind in ("pcap", "scapy"):
                             export = request(f"/api/v1/exports/{kind}", {"scenarioId": scenario_id})
                             assert request(export["downloadUrl"])
+                        sample = request('/api/v1/samples/edit', {'packet':scenario['packets'][0]})
+                        template = request('/api/v1/templates', {'name':'Portable sample','packet':sample['packet']})
+                        assert template['packet']['rawHex'] == sample['packet']['rawHex']
+                        scenario.update(mode='listen',listenConfig={'match':{'mode':'vxlan_inner_five_tuple'},'direction':{'derive':'reverse_direction','addresses':'reverse_direction','checksums':'repair'}})
+                        request(f'/api/v1/scenarios/{scenario_id}',scenario,'PUT')
+                        listener = request('/api/v1/exports/scapy',{'scenarioId':scenario_id})
+                        assert b'def inject(' in request(listener['downloadUrl'])
                         # A second instance on the same port must fail without taking over.
                         duplicate = subprocess.run(command + ["--no-browser", "--port", str(port)], env=env, cwd=tmp, stdout=log, stderr=log, timeout=30)
                         assert duplicate.returncode != 0

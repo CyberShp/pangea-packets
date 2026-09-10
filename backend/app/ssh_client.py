@@ -5,6 +5,7 @@ import posixpath
 import shlex
 import codecs
 import time
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +13,36 @@ from typing import Any, Callable
 import paramiko
 
 from .models import RemoteHost
+
+
+def redact_output(text: str, secrets: list[str]) -> str:
+    """Redact diagnostics while preserving explicitly captured binary evidence."""
+    def redact(value):
+        for secret in secrets:
+            if secret: value = value.replace(secret, '[已隐藏]')
+        return value
+    lines = []
+    for line in text.splitlines(keepends=True):
+        try:
+            event = json.loads(line)
+            if isinstance(event,dict) and event.get('event') in ('trigger_evidence','injection_evidence') and re.fullmatch(r'[0-9a-f]{28,131070}',event.get('wireHex','')):
+                for key in list(event):
+                    if key not in ('event','wireHex') and isinstance(event[key],str):
+                        event[key] = redact(event[key])
+                lines.append(json.dumps(event,ensure_ascii=False)+'\n')
+                continue
+        except (ValueError,TypeError):
+            pass
+        if line.startswith('PANGEA_CAPTURE='):
+            try:
+                import base64
+                values=json.loads(line.split('=',1)[1])
+                if isinstance(values,list) and len(values)<=100 and all(isinstance(v,str) and 14<=len(base64.b64decode(v,validate=True))<=65535 for v in values):
+                    lines.append(line); continue
+            except (ValueError,TypeError):
+                pass
+        lines.append(redact(line))
+    return ''.join(lines)
 
 
 @dataclass
@@ -68,9 +99,7 @@ class SSHClient:
         secrets = [value for value in (self.host.auth.password, self.host.privilege.rootPassword) if value]
 
         def clean(text: str) -> str:
-            for secret in secrets:
-                text = text.replace(secret, "[已隐藏]")
-            return text
+            return redact_output(text,secrets)
 
         def consume(kind: str, text: str, final: bool = False) -> None:
             output[kind].append(text)

@@ -39,6 +39,8 @@ from .services import (
 )
 
 app = FastAPI(title="Pangea Packets API", version="0.1.0", openapi_url="/api/v1/openapi.json")
+from .samples import router as samples_router
+app.include_router(samples_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -186,6 +188,8 @@ def api_export_scapy(payload: dict[str, Any]) -> dict[str, str]:
         return create_scapy_export(payload["scenarioId"])
     except KeyError as exc:
         raise not_found(exc)
+    except (ValueError,TypeError,OverflowError) as exc:
+        raise HTTPException(422,detail=str(exc))
 
 
 @app.post("/api/v1/exports/pcap")

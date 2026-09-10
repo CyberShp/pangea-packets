@@ -8,7 +8,7 @@ from .audit import record
 from .executor import _parse_json, _stats_command
 from .models import ExecutionResult, RemoteHost, Scenario
 from .packet_engine import export_listener_script, export_scapy_script
-from .ssh_client import SSHClient
+from .ssh_client import SSHClient, redact_output
 from .storage import EXECUTIONS_DIR, read_json
 
 _workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="packet-execution")
@@ -60,9 +60,7 @@ def run_execution(scenario: Scenario, host: RemoteHost, execution: ExecutionResu
     secrets = [value for value in [host.auth.password, host.privilege.rootPassword] if value]
 
     def clean(text: str) -> str:
-        for secret in secrets:
-            text = text.replace(secret, "[已隐藏]")
-        return text
+        return redact_output(text,secrets)
 
     def output(kind: str, line: str) -> None:
         _log(execution, kind, clean(line))

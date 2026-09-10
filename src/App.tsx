@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, executionStreamUrl } from "./api-contract";
+import SampleWorkbench from './SampleWorkbench';
 
 type ScenarioMode = "direct" | "listen";
 type DrawerTab = "Hex" | "日志" | "校验问题" | "执行输出";
-type NavItem = "场景工作台" | "协议编辑器" | "异常用例" | "监听模式" | "远端主机" | "执行结果" | "设置";
+type NavItem = "场景工作台" | "报文样本" | "协议编辑器" | "异常用例" | "监听模式" | "远端主机" | "执行结果" | "设置";
 
 type Layer = {
   id: string;
@@ -25,7 +26,7 @@ type Mutation = {
   applyOrder?: number;
 };
 
-type Packet = {
+export type Packet = {
   id: string;
   enabled: boolean;
   name: string;
@@ -34,6 +35,7 @@ type Packet = {
   intervalMs: number;
   layers: Layer[];
   mutations: Mutation[];
+  rawHex?: string | null;
 };
 
 type Scenario = {
@@ -54,13 +56,13 @@ type Scenario = {
       deepCondition?: string;
     };
     trigger: { packetIndex: number; tcpFlags: string[]; delayMs: number };
-    direction: { mode: string; derive: string };
+    direction: { mode: string; derive: string; addresses?: string; checksums?: string };
     cachePolicy: { storePayload: boolean; persistToDisk: boolean; maxRecords: number };
   } | null;
   packets: Packet[];
 };
 
-type Template = { id: string; name: string; builtin: boolean; description?: string; layers: Layer[] };
+type Template = { id: string; name: string; builtin: boolean; description?: string; layers: Layer[]; packet?: Packet };
 type Host = { id: string; name: string; address: string; sshPort: number; auth?: { username?: string }; lastCheck?: Record<string, unknown> };
 type Nic = { name: string; mac: string; ips: string[]; link: string; speed: string; driver: string; pci: string };
 type Offload = Record<string, boolean | Record<string, unknown>>;
@@ -68,8 +70,8 @@ type Execution = { id: string; scenarioId: string; mode: string; status: string;
 type MutationType = { type: string; displayName: string; strategies: string[] };
 type Preview = { hex: string; length: number; warnings: Array<{ code: string; message: string }> };
 
-const nav: NavItem[] = ["场景工作台", "远端主机", "执行结果"];
-const navGlyphs = ["▦", "▣", "↗"];
+const nav: NavItem[] = ["场景工作台", "报文样本", "远端主机", "执行结果"];
+const navGlyphs = ["▦", "▤", "▣", "↗"];
 const drawerTabs: DrawerTab[] = ["Hex", "日志", "校验问题", "执行输出"];
 
 const emptyHostForm = { name: "", address: "", username: "", password: "", rootPassword: "", sshPort: 22 };
@@ -166,7 +168,7 @@ export default function App() {
   const addPacket = () => {
     const template = templates.find((item) => item.id === (templateId || templates[0]?.id));
     if (!scenario || !template) return;
-    const packet: Packet = { id: crypto.randomUUID(), name: `${template.name} ${scenario.packets.length + 1}`, templateId: template.id, enabled: true, sendCount: 1, intervalMs: 0, layers: structuredClone(template.layers), mutations: [] };
+    const packet: Packet = { ...(template.packet ? structuredClone(template.packet) : { layers: structuredClone(template.layers), mutations: [] }), id: crypto.randomUUID(), name: `${template.name} ${scenario.packets.length + 1}`, templateId: template.id, enabled: true, sendCount: 1, intervalMs: 0 };
     updateScenario({ packets: [...scenario.packets, packet] }); setSelectedPacketId(packet.id);
   };
 
@@ -469,9 +471,9 @@ export default function App() {
         <div className="nav-group-label">工作区</div>
         <nav>
           {nav.map((item, index) => (
-            <button key={item} onClick={() => setActiveNav(item)} className={`nav-item ${(item === "场景工作台" ? inScene : activeNav === item) ? "active" : ""}`}>
+            <button key={item} onClick={() => setActiveNav(item)} className={`nav-item ${(item === "场景工作台" ? inScene && activeNav !== '报文样本' : activeNav === item) ? "active" : ""}`}>
               <span className="nav-glyph">{navGlyphs[index]}</span>
-              {item === "场景工作台" ? "场景" : item === "远端主机" ? "主机" : "执行历史"}
+              {item === "场景工作台" ? "场景" : item === "远端主机" ? "主机" : item === '报文样本' ? '报文样本' : "执行历史"}
               {item === "异常用例" && <em>{selectedPacket?.mutations.length ?? 0}</em>}
             </button>
           ))}
@@ -529,6 +531,7 @@ export default function App() {
           />
         {sceneView === "config" && scenario?.mode === "listen" && <ListenEditor scenario={scenario} onChange={updateScenario} />}
         </div>}
+        <div hidden={activeNav !== '报文样本'}><SampleWorkbench current={selectedPacket} canAdd={!!scenario && !running && !saving && !validating} hosts={hosts} onTemplates={async () => { const result = await apiGet<{items: Template[]}>('/templates'); setTemplates(result.items); }} onAdd={packet => { if (!scenario || running || saving || validating) return; const copy = {...structuredClone(packet), id: crypto.randomUUID()}; updateScenario({packets: [...scenario.packets, copy]}); setSelectedPacketId(copy.id); }} /></div>
         {activeNav === "协议编辑器" && <ProtocolEditor packet={selectedPacket} preview={currentPreview} onChange={updatePacket} />}
         {activeNav === "异常用例" && <MutationPage key={`${scenario?.id}/${selectedPacket?.id}`} packet={selectedPacket} mutationTypes={mutationTypes} onChange={updatePacket} />}
         {activeNav === "监听模式" && <ListenPage scenario={scenario} />}
@@ -649,6 +652,7 @@ function ScenarioWorkbench({ scenario, selectedPacketId, setSelectedPacketId, te
 
 function ProtocolEditor({ packet, preview, onChange }: { packet?: Packet; preview: Preview | null; onChange: (packet: Packet) => void }) {
   if (!packet) return <EmptyState title="未选择报文" text="请先在场景工作台选择报文。" />;
+  if (packet.rawHex != null) return <section className="panel"><h2>原始样本报文</h2><p>从「报文样本」载入当前场景报文，可修改协议字段、插入或删除字节、追加 Padding 并保存为模板。</p><pre className="sample-hex">{chunkHex(packet.rawHex)}</pre></section>;
   const changeLayer = (layer: Layer) => onChange({ ...packet, layers: packet.layers.map((item) => item.id === layer.id ? layer : item) });
   return <div className="other-page">
     <div className="page-title"><div><div className="eyebrow">PACKET / {packet.id}</div><h1>协议编辑器</h1><p>修改字段后自动更新字节预览，保存场景后可导出。</p></div></div>
@@ -777,8 +781,10 @@ function ListenEditor({ scenario, onChange }: { scenario: Scenario; onChange: (p
     <label>第 N 个匹配包触发<input type="number" min="1" value={config.trigger.packetIndex} onChange={e=>change({trigger:{...config.trigger,packetIndex:Number(e.target.value)}})} /></label>
     <label>注入延迟（ms）<input type="number" min="0" value={config.trigger.delayMs} onChange={e=>change({trigger:{...config.trigger,delayMs:Number(e.target.value)}})} /></label>
     <label>TCP 标记<input value={config.trigger.tcpFlags.join('')} placeholder="例如 SA；留空不限制" onChange={e=>change({trigger:{...config.trigger,tcpFlags:e.target.value.toUpperCase().replace(/\s/g,'').split('')}})} /></label>
-    <label>TCP 序号继承<select value={config.direction.derive} onChange={e=>change({direction:{mode:e.target.value,derive:e.target.value}})}><option value="same_direction">同向继承 seq / ack</option><option value="reverse_direction">反向继承 seq / ack</option>{config.direction.derive==='none'&&<option value="none">已有 none 配置（执行语义待核实）</option>}</select></label>
-  </div><p className="editor-hint">当前监听器处理 IPv4 流量。BPF 与五元组同时生效，选择 VXLAN 时须核对外层 UDP 过滤；序号继承不会替你交换 IP、MAC 或端口。匹配不到流量不等于卡件处理正常。</p></section>;
+    <label>TCP 序号继承<select value={config.direction.derive} onChange={e=>change({direction:{...config.direction,mode:e.target.value,derive:e.target.value}})}><option value="same_direction">同向复制触发包 seq / ack</option><option value="reverse_direction">反向响应（按有效负载推导）</option><option value="none">保留报文原有 seq / ack</option></select></label>
+    <label>注入地址映射<select value={config.direction.addresses ?? 'preserve'} onChange={e=>change({direction:{...config.direction,addresses:e.target.value}})}><option value="preserve">保留模板 MAC / IP / 端口</option><option value="same_direction">复制触发包地址与端口</option><option value="reverse_direction">交换触发包地址与端口</option></select></label>
+    <label>注入校验和<select value={config.direction.checksums ?? 'preserve'} onChange={e=>change({direction:{...config.direction,checksums:e.target.value}})}><option value="preserve">保留原值（含指定异常）</option><option value="repair">注入修改后重新计算</option></select></label>
+  </div><p className="editor-hint">推导支持无 VLAN 的 IPv4/TCP 和标准 VXLAN 内层 TCP，不跟踪完整 TCP 会话。长度异常或短包需要保留校验和策略；修改 seq/ack 或地址却保留校验和，可能引入额外校验和错误。一次命中执行一个批次，未命中会报告超时；触发包和发送字节记录在执行日志中。</p></section>;
 }
 
 function HostPage({ hosts, hostForm, setHostForm, selectedHost, interfaces, offload, onCreateHost, onLoadInterfaces, onHostAction, onToggleOffload }: { hosts: Host[]; hostForm: typeof emptyHostForm; setHostForm: (form: typeof emptyHostForm) => void; selectedHost?: Host; interfaces: Nic[]; offload: Offload | null; onCreateHost: () => void; onLoadInterfaces: () => void; onHostAction: (action: "connect-test" | "env-check") => void; onToggleOffload: (key: string, value: boolean) => void }) {
@@ -802,6 +808,8 @@ function executionLogText(log: Record<string, unknown>): string {
     if (event.event === "listen_start") return `开始监听：${event.bpf}`;
     if (event.event === "listen_match") return `已匹配 ${event.matched} 个报文`;
     if (event.event === "listen_complete") return `监听结束：匹配 ${event.matched} 个，发送 ${event.reportedSendCount} 个`;
+    if (event.event === 'trigger_evidence') return '已保存触发报文字节（可导出执行证据）';
+    if (event.event === 'injection_evidence') return `已保存提交网卡的报文字节：${event.packetId}（线上字节须旁路确认）`;
   } catch { /* Plain text output is rendered directly. */ }
   return data;
 }
@@ -815,6 +823,7 @@ function ExecutionDetails({ execution, compact = false }: { execution: Execution
   }, [execution.id, execution.logs?.length]);
   const error = execution.level0?.error ?? (execution.status === "failed" ? execution.level0?.stderr : null);
   return <div className={`execution-output ${compact ? "compact" : ""}`}>
+    <button className="quiet-button" onClick={() => { const url = URL.createObjectURL(new Blob([JSON.stringify(execution,null,2)],{type:'application/json'})); const link=document.createElement('a'); link.href=url; link.download=`${execution.id}-evidence.json`; link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }}>导出执行证据 JSON</button>
     <div className="execution-summary"><b>{execution.id}</b><span className={execution.status === "failed" ? "execution-failed" : ""}>{executionStatus(execution.status)}</span>{execution.level0?.reportedSendCount != null && <span>报告发送：{String(execution.level0.reportedSendCount)}</span>}</div>
     {!!error && <p className="execution-failed" role="alert">失败原因：{String(error)}</p>}
     {!compact && <p className="editor-hint">开始：{execution.startedAt ? executionDate(execution.startedAt).toLocaleString() : "等待开始"}{execution.finishedAt ? ` · 结束：${executionDate(execution.finishedAt).toLocaleString()}` : ""}</p>}

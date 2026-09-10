@@ -147,6 +147,10 @@ def build_scapy_packet(packet: Packet):
 
 
 def final_bytes(packet: Packet) -> bytes:
+    if packet.rawHex is not None:
+        if any(m.enabled for m in packet.mutations):
+            raise ValueError('样本报文请在样本编辑器直接编辑字节，再保存为模板')
+        return bytes.fromhex(packet.rawHex)
     raw = bytearray(bytes(build_scapy_packet(packet)))
     for mutation in _enabled(packet, "invalid_padding"):
         amount = int(mutation.value or 0)
@@ -168,6 +172,9 @@ def final_bytes(packet: Packet) -> bytes:
 
 def preview_packet(packet: Packet) -> PacketPreview:
     raw = final_bytes(packet)
+    if packet.rawHex is not None:
+        from .wire import fields
+        return PacketPreview(hex=raw.hex(' '), length=len(raw), fieldOffsets=[FieldOffset(fieldPath=f['name'],startOffset=f['offset'],endOffset=f['offset']+f['size'],valueHex=raw[f['offset']:f['offset']+f['size']].hex()) for f in fields(raw)])
     warnings: list[ErrorDetail] = []
     for layer in packet.layers:
         if layer.type not in {"ethernet", "ipv4", "tcp", "udp", "vxlan", "raw_payload"}:
@@ -244,6 +251,21 @@ def export_scapy_script(scenario: Scenario, target: Path) -> Path:
 def export_listener_script(scenario: Scenario, target: Path) -> Path:
     if scenario.listenConfig is None:
         raise ValueError("监听模式缺少 listenConfig")
+    from .wire import layout, repair
+    direction = scenario.listenConfig.direction
+    if scenario.listenConfig.match.deepCondition:
+        raise ValueError('暂不支持 deepCondition，请使用 BPF 与五元组')
+    for packet in scenario.packets:
+        if not packet.enabled:
+            continue
+        raw = final_bytes(packet)
+        if direction.derive != 'none' or direction.addresses != 'preserve':
+            p = layout(raw, scenario.listenConfig.match.mode == 'vxlan_inner_five_tuple')
+            if p['proto'] != 6 or len(raw) < p['l4'] + 20:
+                raise ValueError('自动推导仅支持完整 IPv4/TCP 首部，请检查报文或选择保留配置')
+        if direction.checksums == 'repair':
+            repair(raw)
+    runtime = Path(__file__).with_name('wire.py').read_text(encoding='utf-8')
     data = scenario.model_dump(mode="json")
     for packet in data["packets"]:
         model = next(item for item in scenario.packets if item.id == packet["id"])
@@ -254,6 +276,7 @@ def export_listener_script(scenario: Scenario, target: Path) -> Path:
 import argparse, json, time
 from scapy.all import Ether, IP, TCP, UDP, conf, sniff
 from scapy.layers.vxlan import VXLAN
+{runtime}
 SCENARIO = json.loads({config!r})
 LISTEN = SCENARIO['listenConfig']
 MATCH = LISTEN['match']
@@ -285,24 +308,10 @@ def flow_ok(packet):
     return True, transport
 
 def patch_seq_ack(raw, packet, transport):
-    # This patches only the TCP seq/ack fields in final raw bytes, preserving deliberate
-    # length/checksum/padding/truncation mutations already built by the controller.
-    result = bytearray(raw)
-    if MATCH.get('mode') == 'vxlan_inner_five_tuple':
-        outer_ihl = (result[14] & 0x0f) * 4
-        offset = 14 + outer_ihl + 8 + 8 + 14
-        inner_ihl = (result[offset] & 0x0f) * 4
-        tcp_offset = offset + inner_ihl
-    else:
-        tcp_offset = 14 + ((result[14] & 0x0f) * 4)
-    payload_len = max(0, len(bytes(transport.payload)))
-    seq, ack = int(transport.seq), int(transport.ack)
-    direction = (LISTEN.get('direction') or {{}}).get('derive', 'same_direction')
-    if direction == 'reverse_direction':
-        seq, ack = ack, seq + payload_len + (1 if 'S' in str(transport.flags) or 'F' in str(transport.flags) else 0)
-    result[tcp_offset+4:tcp_offset+8] = seq.to_bytes(4, 'big')
-    result[tcp_offset+8:tcp_offset+12] = ack.to_bytes(4, 'big')
-    return bytes(result)
+    direction = LISTEN.get('direction') or {{}}
+    return inject(raw, bytes(packet), MATCH.get('mode')=='vxlan_inner_five_tuple',
+        direction.get('derive','same_direction'), direction.get('addresses','preserve'),
+        direction.get('checksums','preserve'))
 
 def main():
     parser = argparse.ArgumentParser()
@@ -313,31 +322,52 @@ def main():
     target_index = int((LISTEN.get('trigger') or {{}}).get('packetIndex', 1))
     delay = int((LISTEN.get('trigger') or {{}}).get('delayMs', 0)) / 1000
     seen = matched = sent = 0
+    triggered = False
+    failure = None
     socket = conf.L2socket(iface=args.iface)
     def handle(packet):
-        nonlocal seen, matched, sent
+        nonlocal seen, matched, sent, triggered
         seen += 1
         ok, transport = flow_ok(packet)
         if not ok: return
         matched += 1
         print(json.dumps({{'event':'listen_match','seen':seen,'matched':matched,'seq':getattr(transport, 'seq', None),'ack':getattr(transport, 'ack', None)}}), flush=True)
         if matched != target_index: return
+        triggered = True
+        print(json.dumps({{'event':'trigger_evidence','wireHex':bytes(packet).hex(),'timestamp':time.time()}}), flush=True)
         if delay: time.sleep(delay)
+        prepared = []
         for item in SCENARIO['packets']:
             if not item.get('enabled', True): continue
             raw = bytes.fromhex(item['_wireHex'])
-            if isinstance(transport, TCP): raw = patch_seq_ack(raw, packet, transport)
-            for _ in range(int(item.get('sendCount', 1))):
-                socket.send(raw); sent += 1; time.sleep(int(item.get('intervalMs', 0)) / 1000)
+            raw = patch_seq_ack(raw, packet, transport)
+            prepared.append((item,raw))
+        for item,raw in prepared:
+            for n in range(int(item.get('sendCount', 1))):
+                socket.send(raw); sent += 1
+                if n == 0:
+                    print(json.dumps({{'event':'injection_evidence','packetId':item['id'],'wireHex':raw.hex(),'plannedSendCount':item.get('sendCount',1),'timestamp':time.time()}}), flush=True)
+                time.sleep(int(item.get('intervalMs', 0)) / 1000)
         raise KeyboardInterrupt
+    def guarded_handle(packet):
+        nonlocal failure
+        try:
+            handle(packet)
+        except Exception as exc:
+            failure = str(exc)
+            print(json.dumps({{'event':'injection_failed','message':failure}}), flush=True)
+            raise KeyboardInterrupt
     try:
         print(json.dumps({{'event':'listen_start','bpf':bpf,'timeout':args.timeout}}), flush=True)
-        sniff(iface=args.iface, filter=bpf, timeout=args.timeout, store=False, prn=handle)
+        sniff(iface=args.iface, filter=bpf, timeout=args.timeout, store=False, prn=guarded_handle)
     except KeyboardInterrupt:
         pass
     finally:
         socket.close()
-    print(json.dumps({{'event':'listen_complete','seen':seen,'matched':matched,'reportedSendCount':sent}}), flush=True)
+    print(json.dumps({{'event':'listen_complete','seen':seen,'matched':matched,'reportedSendCount':sent,'triggered':triggered}}), flush=True)
+    if not triggered: raise SystemExit('监听超时，未命中触发条件')
+    if failure: raise SystemExit(failure)
+    if not sent: raise SystemExit('没有报文成功提交到发送接口')
 if __name__ == '__main__': main()
 '''
     target.parent.mkdir(parents=True, exist_ok=True)

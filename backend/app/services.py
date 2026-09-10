@@ -18,7 +18,7 @@ from .models import (
     ValidationResult,
     new_id,
 )
-from .packet_engine import export_pcap, export_scapy_script, preview_packet
+from .packet_engine import export_pcap, export_scapy_script, export_listener_script, preview_packet
 from .storage import EXECUTIONS_DIR, EXPORTS_DIR, HOSTS_FILE, SCENARIOS_DIR, TEMPLATES_DIR, read_json, write_json
 
 
@@ -68,6 +68,27 @@ def validate_scenario_obj(scenario: Scenario) -> ValidationResult:
         errors.append(ErrorDetail(code="SCENARIO_EMPTY_PACKETS", message="场景至少需要一个报文", path="packets"))
     if scenario.mode == "listen" and scenario.listenConfig is None:
         errors.append(ErrorDetail(code="LISTEN_CONFIG_REQUIRED", message="监听模式需要配置监听规则", path="listenConfig"))
+    if scenario.mode == 'listen' and scenario.listenConfig:
+        from .wire import layout, repair
+        from .packet_engine import final_bytes
+        direction = scenario.listenConfig.direction
+        if scenario.sendOptions.loopCount != 1:
+            errors.append(ErrorDetail(code='LISTEN_SINGLE_BATCH',message='监听模式一次触发一个批次，场景循环次数须为 1'))
+        if scenario.listenConfig.match.deepCondition:
+            errors.append(ErrorDetail(code='LISTEN_UNSUPPORTED_CONDITION',message='暂不支持 deepCondition，请使用 BPF 与五元组'))
+        for packet in scenario.packets:
+            if not packet.enabled: continue
+            try:
+                raw = final_bytes(packet)
+                if direction.derive != 'none' or direction.addresses != 'preserve':
+                    p = layout(raw,scenario.listenConfig.match.mode=='vxlan_inner_five_tuple')
+                    if p['proto']!=6 or len(raw)<p['l4']+20:
+                        raise ValueError('序号与地址推导仅支持完整 IPv4/TCP 首部')
+                if direction.checksums=='repair': repair(raw)
+                elif direction.derive!='none' or direction.addresses!='preserve':
+                    warnings.append(ErrorDetail(code='INJECTION_CHECKSUM_PRESERVED',message='注入修改序号或地址但保留校验和，可能产生额外校验和异常'))
+            except (ValueError,TypeError,OverflowError,IndexError) as exc:
+                errors.append(ErrorDetail(code='INJECTION_INVALID_PACKET',message=f'{packet.name}: {exc}'))
     for packet_index, packet in enumerate(scenario.packets):
         try:
             preview_packet(packet)
@@ -198,9 +219,10 @@ def get_execution(execution_id: str) -> ExecutionResult:
 def create_scapy_export(scenario_id: str) -> dict[str, str]:
     scenario = get_scenario(scenario_id)
     file_id = new_id("file")
-    path = EXPORTS_DIR / "scapy" / file_id / "send_scenario.py"
-    export_scapy_script(scenario, path)
-    return {"fileId": file_id, "fileName": "send_scenario.py", "downloadUrl": f"/api/v1/files/{file_id}"}
+    filename = 'listen_scenario.py' if scenario.mode == 'listen' else 'send_scenario.py'
+    path = EXPORTS_DIR / "scapy" / file_id / filename
+    (export_listener_script if scenario.mode == 'listen' else export_scapy_script)(scenario, path)
+    return {"fileId": file_id, "fileName": filename, "downloadUrl": f"/api/v1/files/{file_id}"}
 
 
 def create_pcap_export(scenario_id: str) -> dict[str, str]:

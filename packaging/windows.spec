@@ -6,7 +6,7 @@ scapy_data, scapy_binaries, scapy_imports = collect_all('scapy')
 a = Analysis(
     [str(root / 'backend/portable.py')], pathex=[str(root / 'backend')],
     binaries=scapy_binaries,
-    datas=[(str(root / 'dist'), 'dist'), (str(root / 'skills/ibmc'), 'skills/ibmc')] + scapy_data,
+    datas=[(str(root / 'dist'), 'dist'), (str(root / 'skills/ibmc'), 'skills/ibmc'), (str(root / 'backend/app/wire.py'), 'app')] + scapy_data,
     hiddenimports=scapy_imports,
     hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=[], noarchive=False,
 )
