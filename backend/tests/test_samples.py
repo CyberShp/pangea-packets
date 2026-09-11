@@ -137,7 +137,9 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(bytes(p),raw)
 
     def test_short_fragment_and_invalid_length_blocked(self):
-        for target,source in ((frame()[:35],frame()),(frame(),frame()[:35]),(bytes(Ether()/IP(flags='MF')/TCP()),frame())):
+        fragment = Ether(frame())
+        fragment[IP].flags = 'MF'
+        for target,source in ((frame()[:35],frame()),(frame(),frame()[:35]),(bytes(fragment),frame())):
             with self.assertRaises(ValueError): inject(target,source)
         with self.assertRaises(ValueError): repair(frame()[:40])
 
@@ -145,7 +147,7 @@ class InjectionTests(unittest.TestCase):
         scenario=Scenario(name='listener',mode='listen',packets=[Packet(name='test',rawHex=frame().hex())],listenConfig={'direction':{'derive':'reverse_direction','addresses':'reverse_direction','checksums':'repair'},'trigger':{'packetIndex':1}})
         with tempfile.TemporaryDirectory() as directory:
             path=export_listener_script(scenario,Path(directory)/'listen.py')
-            scope={'__name__':'test_listener'}; exec(compile(path.read_text(),str(path),'exec'),scope)
+            scope={'__name__':'test_listener'}; exec(compile(path.read_text(encoding='utf-8'),str(path),'exec'),scope)
             with patch.object(scope['conf'],'L2socket') as socket, patch('sys.argv',['listen','--iface','test0']), redirect_stdout(io.StringIO()) as output:
                 scope['sniff']=lambda **kw: kw['prn'](Ether(frame()))
                 scope['main']()

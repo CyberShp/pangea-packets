@@ -46,7 +46,7 @@ class EditingTests(unittest.TestCase):
             with RawPcapReader(str(pcap)) as reader:
                 self.assertEqual(next(reader)[0], expected)
             script = export_scapy_script(scenario, Path(directory) / "send.py")
-            tree = ast.parse(script.read_text())
+            tree = ast.parse(script.read_text(encoding="utf-8"))
             assignment = next(node for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "SCENARIO" for target in node.targets))
             embedded = json.loads(ast.literal_eval(assignment.value.args[0]))
             self.assertEqual(bytes.fromhex(embedded["packets"][0]["_wireHex"]), expected)
