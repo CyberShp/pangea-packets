@@ -4,6 +4,7 @@ export type Doc = {
   version: string;
   note: string;
   parsed: boolean;
+  source?: string;
 };
 export type Risk = {
   id: string;
@@ -12,6 +13,7 @@ export type Risk = {
   selected: boolean;
 };
 export type Path = {
+  docId?: string;
   id: string;
   name: string;
   riskId: string;
@@ -19,6 +21,8 @@ export type Path = {
   method: string;
 };
 export type Case = {
+  reviewNote?: string;
+  reviewedAt?: string;
   id: string;
   name: string;
   pathId: string;
@@ -37,6 +41,7 @@ export type Run = {
   note: string;
 };
 export type Project = {
+  goal?: string;
   id: string;
   name: string;
   model: string;
@@ -118,10 +123,13 @@ export function isDemoStore(value: unknown): value is DemoStore {
     obj(v) && keys.every((k) => typeof v[k] === "string");
   const list = (v: unknown, test: (x: unknown) => boolean) =>
     Array.isArray(v) && v.every(test);
+  const optionalStrings = (v: unknown, keys: string[]) =>
+    obj(v) && keys.every((k) => v[k] === undefined || typeof v[k] === "string");
   const caseOK = (v: unknown) =>
     strings(v, ["id", "name", "pathId", "method", "steps", "criterion"]) &&
     obj(v) &&
-    typeof v.reviewed === "boolean";
+    typeof v.reviewed === "boolean" &&
+    optionalStrings(v, ["reviewNote", "reviewedAt"]);
   return (
     obj(value) &&
     value.version === 1 &&
@@ -130,12 +138,14 @@ export function isDemoStore(value: unknown): value is DemoStore {
       (p) =>
         obj(p) &&
         strings(p, ["id", "name", "model", "version", "updated"]) &&
+        optionalStrings(p, ["goal"]) &&
         list(
           p.docs,
           (d) =>
             obj(d) &&
             strings(d, ["id", "name", "version", "note"]) &&
-            typeof d.parsed === "boolean",
+            typeof d.parsed === "boolean" &&
+            optionalStrings(d, ["source"]),
         ) &&
         list(
           p.risks,
@@ -144,8 +154,11 @@ export function isDemoStore(value: unknown): value is DemoStore {
             strings(r, ["id", "name", "reason"]) &&
             typeof r.selected === "boolean",
         ) &&
-        list(p.paths, (a) =>
-          strings(a, ["id", "name", "riskId", "steps", "method"]),
+        list(
+          p.paths,
+          (a) =>
+            strings(a, ["id", "name", "riskId", "steps", "method"]) &&
+            optionalStrings(a, ["docId"]),
         ) &&
         list(p.cases, caseOK) &&
         list(
