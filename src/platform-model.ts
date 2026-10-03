@@ -21,6 +21,7 @@ export type Path = {
   method: string;
 };
 export type Case = {
+  reviews?: { at: string; approved: boolean; note: string }[];
   reviewNote?: string;
   reviewedAt?: string;
   id: string;
@@ -129,7 +130,15 @@ export function isDemoStore(value: unknown): value is DemoStore {
     strings(v, ["id", "name", "pathId", "method", "steps", "criterion"]) &&
     obj(v) &&
     typeof v.reviewed === "boolean" &&
-    optionalStrings(v, ["reviewNote", "reviewedAt"]);
+    optionalStrings(v, ["reviewNote", "reviewedAt"]) &&
+    (v.reviews === undefined ||
+      list(
+        v.reviews,
+        (r) =>
+          obj(r) &&
+          strings(r, ["at", "note"]) &&
+          typeof r.approved === "boolean",
+      ));
   return (
     obj(value) &&
     value.version === 1 &&
