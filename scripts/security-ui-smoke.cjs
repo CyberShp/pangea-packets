@@ -109,6 +109,10 @@ const fs = require("node:fs");
       await checkbox.check();
     await screenshot("review");
     await click("确认设计");
+    assert.equal(
+      (await saved()).projects.find((p) => p.id === id).cases[0].reviews.length,
+      2,
+    );
     await nav(path("execute"));
     await click("＋ 创建模拟批次");
     data = await saved();
@@ -207,13 +211,60 @@ const fs = require("node:fs");
       await page
         .locator(".app-shell")
         .evaluate((e) => getComputedStyle(e).backgroundColor),
-      "rgb(14, 17, 22)",
+      "rgb(245, 247, 249)",
     );
     await page.getByLabel("切换测试应用").selectOption("ibmc");
     await page
       .getByRole("heading", { name: "全部项目", exact: true })
       .waitFor();
     assert.equal(await page.locator(".s-packet-container").isVisible(), false);
+    // Dirty dialog dismissals require an explicit discard; cancelled dismissal preserves input.
+    await nav(path("intake"));
+    await click("＋ 添加资料");
+    await page.getByRole("dialog").getByLabel("资料名称").fill("未保存资料");
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "取消", exact: true })
+      .click();
+    const discard = page.getByRole("dialog", { name: "放弃未保存的修改？" });
+    await discard.getByRole("button", { name: "取消", exact: true }).click();
+    assert.equal(
+      await page.getByRole("dialog").getByLabel("资料名称").inputValue(),
+      "未保存资料",
+    );
+    await page.keyboard.press("Escape");
+    await page
+      .getByRole("dialog", { name: "放弃未保存的修改？" })
+      .getByRole("button", { name: "放弃修改", exact: true })
+      .click();
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    // A concurrent tab update must not be overwritten by this tab's stale store.
+    await nav(path("design"));
+    await click("编辑用例");
+    await page
+      .getByRole("dialog")
+      .getByLabel("用例名称")
+      .fill("本窗口尚未保存的名称");
+    await page.evaluate(() => {
+      const key = "pangea.ibmc.demo.v1",
+        v = JSON.parse(localStorage.getItem(key));
+      v.projects[0].goal = "另一窗口的更新";
+      localStorage.setItem(key, JSON.stringify(v));
+    });
+    const concurrent = await saved();
+    await click("保存修改");
+    await page
+      .getByText(
+        "另一个页面已修改本地记录。为避免覆盖，请刷新页面读取最新数据后再编辑。",
+        { exact: true },
+      )
+      .waitFor();
+    assert.deepEqual(await saved(), concurrent);
+    await page.keyboard.press("Escape");
+    await page
+      .getByRole("dialog", { name: "放弃未保存的修改？" })
+      .getByRole("button", { name: "放弃修改", exact: true })
+      .click();
     // Preserve corrupt data instead of silently replacing it.
     await page.evaluate(() =>
       localStorage.setItem("pangea.ibmc.demo.v1", '{"broken":true}'),

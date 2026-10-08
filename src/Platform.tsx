@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import PacketApp from "./App";
+import { useDiscardGuard } from "./ui";
 import {
   DEMO_KEY,
   draftFor,
@@ -271,6 +272,18 @@ function Modal({
 }
 function EditDialog({ editor, close }: { editor: Editor; close: () => void }) {
   const [error, setError] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const discard = useDiscardGuard(dirty);
+  const requestClose = () => discard.request(close);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   const submit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -285,60 +298,75 @@ function EditDialog({ editor, close }: { editor: Editor; close: () => void }) {
     else setError("保存未完成，请检查页面中的存储错误提示。");
   };
   return (
-    <Modal title={editor.title} close={close}>
-      <p className="s-muted">
-        {editor.note || "保存后可继续完善，记录保存在当前浏览器。"}
-      </p>
-      <form onSubmit={submit}>
-        {error && (
-          <p className="s-warning" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="s-form">
-          {editor.fields.map((f) => (
-            <label key={f.key}>
-              {f.label}
-              {!f.optional && <span className="s-required"> *</span>}
-              {f.options ? (
-                <select
-                  name={f.key}
-                  defaultValue={f.value || f.options[0]?.value}
-                  required={!f.optional}
-                >
-                  {f.options.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              ) : f.multiline ? (
-                <textarea
-                  name={f.key}
-                  defaultValue={f.value}
-                  rows={4}
-                  required={!f.optional}
-                  maxLength={6000}
-                />
-              ) : (
-                <input
-                  name={f.key}
-                  defaultValue={f.value}
-                  required={!f.optional}
-                  maxLength={160}
-                />
-              )}
-            </label>
-          ))}
-        </div>
-        <footer className="s-modal-footer">
-          <button type="button" onClick={close}>
-            取消
-          </button>
-          <button className="s-primary">{editor.submit || "保存修改"}</button>
-        </footer>
-      </form>
-    </Modal>
+    <>
+      <Modal title={editor.title} close={requestClose}>
+        <p className="s-muted">
+          {editor.note || "保存后可继续完善，记录保存在当前浏览器。"}
+        </p>
+        <form
+          onSubmit={submit}
+          onChange={(e) => {
+            const data = new FormData(e.currentTarget);
+            setDirty(
+              editor.fields.some(
+                (f) =>
+                  String(data.get(f.key) || "") !==
+                  (f.value ?? f.options?.[0]?.value ?? ""),
+              ),
+            );
+          }}
+        >
+          {error && (
+            <p className="s-warning" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="s-form">
+            {editor.fields.map((f) => (
+              <label key={f.key}>
+                {f.label}
+                {!f.optional && <span className="s-required"> *</span>}
+                {f.options ? (
+                  <select
+                    name={f.key}
+                    defaultValue={f.value || f.options[0]?.value}
+                    required={!f.optional}
+                  >
+                    {f.options.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : f.multiline ? (
+                  <textarea
+                    name={f.key}
+                    defaultValue={f.value}
+                    rows={4}
+                    required={!f.optional}
+                    maxLength={6000}
+                  />
+                ) : (
+                  <input
+                    name={f.key}
+                    defaultValue={f.value}
+                    required={!f.optional}
+                    maxLength={160}
+                  />
+                )}
+              </label>
+            ))}
+          </div>
+          <footer className="s-modal-footer">
+            <button type="button" onClick={requestClose}>
+              取消
+            </button>
+            <button className="s-primary">{editor.submit || "保存修改"}</button>
+          </footer>
+        </form>
+      </Modal>
+      {discard.dialog}
+    </>
   );
 }
 
@@ -355,6 +383,14 @@ export default function Platform() {
       return { version: 1, projects: [] };
     }
   });
+  const persisted = useRef<string | null>(null);
+  useEffect(() => {
+    try {
+      persisted.current = localStorage.getItem(DEMO_KEY);
+    } catch {
+      /* Read error is surfaced below. */
+    }
+  }, []);
   const [storageError, setStorageError] = useState(() => {
     try {
       const raw = localStorage.getItem(DEMO_KEY);
@@ -408,7 +444,15 @@ export default function Platform() {
       return false;
     }
     try {
-      localStorage.setItem(DEMO_KEY, JSON.stringify(next));
+      if (localStorage.getItem(DEMO_KEY) !== persisted.current) {
+        setStorageError(
+          "另一个页面已修改本地记录。为避免覆盖，请刷新页面读取最新数据后再编辑。",
+        );
+        return false;
+      }
+      const serialized = JSON.stringify(next);
+      localStorage.setItem(DEMO_KEY, serialized);
+      persisted.current = serialized;
       setStore(next);
       setNotice(message);
       return true;
@@ -688,6 +732,14 @@ export default function Platform() {
                   reviewed: approved,
                   reviewNote: reviewNote.trim(),
                   reviewedAt: new Date().toISOString(),
+                  reviews: [
+                    ...(x.reviews ?? []),
+                    {
+                      at: new Date().toISOString(),
+                      approved,
+                      note: reviewNote.trim(),
+                    },
+                  ],
                 }
               : x,
           ),
@@ -752,13 +804,33 @@ export default function Platform() {
             <option value="packets">异常报文测试</option>
           </select>
           <span className="s-header-end">
-            <Badge>iBMC 交互原型</Badge>
+            <Badge>
+              {app === "packets" ? "真实设备执行" : "iBMC 交互原型"}
+            </Badge>
             <a href="#/">返回平台</a>
           </span>
         </header>
         {storageError && app !== "packets" && (
           <div className="s-storage" role="alert">
-            {storageError}
+            <span>{storageError}</span>
+            <button
+              onClick={() => {
+                try {
+                  const raw = localStorage.getItem(DEMO_KEY);
+                  if (raw !== persisted.current) {
+                    setStorageError("本地记录已改变，请刷新页面读取最新数据。");
+                    return;
+                  }
+                  if (raw && !isDemoStore(JSON.parse(raw))) return;
+                  setStorageError("");
+                  setNotice("已重新检查，可再次尝试保存。");
+                } catch {
+                  setNotice("仍无法读取本地记录，请检查浏览器权限。");
+                }
+              }}
+            >
+              重新检查存储
+            </button>
           </div>
         )}
         {notice && (
@@ -1736,15 +1808,48 @@ export default function Platform() {
                                 </>
                               ) : (
                                 <>
-                                  <h3>最近审查意见</h3>
-                                  <p className="s-pre">
-                                    {selectedCase.reviewNote || "暂无审查意见"}
-                                  </p>
-                                  <p className="s-muted">
-                                    {selectedCase.reviewedAt
-                                      ? date(selectedCase.reviewedAt)
-                                      : "尚未记录审查时间"}
-                                  </p>
+                                  <h3>审查记录</h3>
+                                  {selectedCase.reviews?.length ? (
+                                    <ol className="s-review-history">
+                                      {[...selectedCase.reviews]
+                                        .reverse()
+                                        .map((r, i) => (
+                                          <li key={`${r.at}-${i}`}>
+                                            <div className="s-row">
+                                              <Badge
+                                                tone={
+                                                  r.approved ? "green" : "amber"
+                                                }
+                                              >
+                                                {r.approved
+                                                  ? "设计已确认"
+                                                  : "退回完善"}
+                                              </Badge>
+                                              <time>{date(r.at)}</time>
+                                            </div>
+                                            <p className="s-pre">
+                                              {r.note ||
+                                                (r.approved
+                                                  ? "已完成设计检查项"
+                                                  : "未填写意见")}
+                                            </p>
+                                          </li>
+                                        ))}
+                                    </ol>
+                                  ) : (
+                                    <>
+                                      <h3>最近审查意见</h3>
+                                      <p className="s-pre">
+                                        {selectedCase.reviewNote ||
+                                          "暂无审查意见"}
+                                      </p>
+                                      <p className="s-muted">
+                                        {selectedCase.reviewedAt
+                                          ? date(selectedCase.reviewedAt)
+                                          : "尚未记录审查时间"}
+                                      </p>
+                                    </>
+                                  )}
                                 </>
                               )}
                               <footer className="s-detail-footer">

@@ -847,9 +847,6 @@ body:has(.security-shell) {
   background: #fff1df;
   color: #965c12;
 }
-.s-packet-container .app-shell {
-  min-width: 1180px;
-}
 .s-packet-container {
   overflow-x: auto;
 }
@@ -1154,4 +1151,25 @@ body:has(.security-shell) {
 }
 .security-shell {
   font-synthesis: weight;
+}
+
+.security-shell .s-review-history {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.security-shell .s-review-history li {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--s-line, #e1e8ed);
+}
+.security-shell .s-review-history time {
+  font-size: 12px;
+  color: #708294;
+}
+.security-shell .s-storage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
 }
